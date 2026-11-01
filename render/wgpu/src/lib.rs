@@ -28,7 +28,8 @@ type Error = Box<dyn std::error::Error>;
 
 #[macro_use]
 pub mod utils;
-mod segments;
+/// Turu: [`segments::ThreadState`] and [`segments::swap`], for several players on one thread.
+pub mod segments;
 mod arena;
 
 mod bitmaps;
