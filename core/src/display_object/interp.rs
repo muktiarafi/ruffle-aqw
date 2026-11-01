@@ -36,6 +36,31 @@ thread_local! {
     static BLEND: Cell<Option<f32>> = const { Cell::new(None) };
 }
 
+/// Turu: one player's frame count and blend while another player's are the thread's (see
+/// `crate::PlayerThreadState`).
+pub struct ThreadState {
+    frame: u64,
+    frame_finished: Option<Instant>,
+    blend: Option<f32>,
+}
+
+impl Default for ThreadState {
+    fn default() -> Self {
+        Self {
+            frame: 1,
+            frame_finished: None,
+            blend: None,
+        }
+    }
+}
+
+/// Turu: swaps `state` with the thread's.
+pub(crate) fn swap(state: &mut ThreadState) {
+    state.frame = FRAME.replace(state.frame);
+    state.frame_finished = FRAME_FINISHED.replace(state.frame_finished);
+    state.blend = BLEND.replace(state.blend);
+}
+
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }

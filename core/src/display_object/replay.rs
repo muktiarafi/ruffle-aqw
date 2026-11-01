@@ -44,6 +44,11 @@ fn changes() -> u64 {
     CHANGES.with(Cell::get)
 }
 
+/// Turu: swaps one player's change count with the thread's (see `crate::PlayerThreadState`).
+pub(crate) fn swap_changes(changes: &mut u64) {
+    *changes = CHANGES.replace(*changes);
+}
+
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Replays on (default) or off (every picture walks the stage, for comparisons).

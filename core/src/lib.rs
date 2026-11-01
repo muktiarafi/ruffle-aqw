@@ -15,6 +15,30 @@ pub use display_object::graphic::deferred_shapes::set_wait as set_shape_wait;
 /// AQW build: frame interpolation (an option, off by default).
 pub use display_object::interp as frame_interpolation;
 
+/// Turu: the thread-local state that belongs to one player: its queued and running shape
+/// tessellations (`deferred_shapes`), the change count its recorded pictures are checked
+/// against (`replay`) and its frame interpolation's frame count. With several players on one
+/// thread, the one in front keeps its state in the thread; each other player keeps its own
+/// here, swapped in while its code runs, so a hidden player's frames neither spoil the shown
+/// one's replays and interpolation nor leave tessellations only its renderer can finish.
+///
+/// A new player's state is `default()`, which is also what the thread starts with.
+#[derive(Default)]
+pub struct PlayerThreadState {
+    shapes: display_object::graphic::deferred_shapes::State,
+    replay_changes: u64,
+    interp: display_object::interp::ThreadState,
+}
+
+impl PlayerThreadState {
+    /// Swaps this state with the thread's.
+    pub fn swap(&mut self) {
+        display_object::graphic::deferred_shapes::swap(&mut self.shapes);
+        display_object::replay::swap_changes(&mut self.replay_changes);
+        display_object::interp::swap(&mut self.interp);
+    }
+}
+
 #[macro_use]
 extern crate num_derive;
 
