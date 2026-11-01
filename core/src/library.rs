@@ -7,7 +7,7 @@ use crate::display_object::{Bitmap, Graphic, MorphShape, Text};
 use crate::font::{Font, FontDescriptor, FontLike, FontQuery, FontType};
 use crate::prelude::*;
 use crate::string::AvmString;
-use crate::tag_utils::SwfMovie;
+use crate::tag_utils::{SwfMovie, SwfMovieData};
 use gc_arena::collect::Trace;
 use gc_arena::{Collect, Mutation};
 use ruffle_render::backend::RenderBackend;
@@ -725,6 +725,19 @@ impl<'gc> Library<'gc> {
     /// AQW build, for the perf log: see `MovieLibraries::movie_data_stats`.
     pub fn movie_data_stats(&self) -> (usize, usize, u64, u64) {
         self.movie_libraries.movie_data_stats()
+    }
+
+    /// Turu: a loaded movie whose URL `matches`, so the frontend can read a SWF the game
+    /// already downloaded (a map's cells and pads) instead of downloading it again. A copy of
+    /// the movie's data (its bytes are shared), so it can leave the GC arena and the thread.
+    pub fn loaded_movie(
+        &self,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<std::sync::Arc<SwfMovieData>> {
+        self.movie_libraries
+            .known_movies()
+            .find(|movie| movie.is_movie() && !movie.data().is_empty() && matches(movie.url()))
+            .map(|movie| std::sync::Arc::new((*movie).clone()))
     }
 
     /// AQW build, for the perf log.
