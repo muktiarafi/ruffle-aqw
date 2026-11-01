@@ -1056,6 +1056,11 @@ impl Player {
         }
     }
 
+    /// Turu: a loaded movie whose URL `matches` (see `Library::loaded_movie`).
+    pub fn loaded_movie(&mut self, matches: impl Fn(&str) -> bool) -> Option<Arc<SwfMovie>> {
+        self.mutate_with_update_context(|context| context.library.loaded_movie(&matches))
+    }
+
     /// AQW build, for the perf log: loaded SWF movies and live GC objects.
     pub fn aqw_memory_report(&mut self) -> String {
         let gc_objects = self.gc_arena.borrow().metrics().total_gc_count();

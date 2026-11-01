@@ -648,6 +648,15 @@ impl<'gc> Library<'gc> {
         self.movie_libraries.movie_data_stats()
     }
 
+    /// Turu: a loaded movie whose URL `matches`, so the frontend can read a SWF the game
+    /// already downloaded (a map's cells and pads) instead of downloading it again.
+    pub fn loaded_movie(&self, matches: impl Fn(&str) -> bool) -> Option<Arc<SwfMovie>> {
+        self.movie_libraries
+            .0
+            .keys()
+            .find(|movie| movie.is_movie() && !movie.data().is_empty() && matches(movie.url()))
+    }
+
     /// AQW build, for the perf log.
     pub fn freed_movie_count(&self) -> usize {
         self.aqw_freed.0
