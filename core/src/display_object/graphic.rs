@@ -814,6 +814,23 @@ pub mod deferred_shapes {
         Arc::as_ptr(&handle.0) as *const ()
     }
 
+    /// Turu: one player's queued and running tessellations while another player's are the
+    /// thread's (see `crate::PlayerThreadState`). Jobs are started on a player's own renderer,
+    /// so only that player's frames can finish them.
+    #[derive(Default)]
+    pub struct State {
+        active: bool,
+        jobs: Vec<Job>,
+        running: HashMap<u64, Job>,
+    }
+
+    /// Turu: swaps `state` with the thread's.
+    pub(crate) fn swap(state: &mut State) {
+        state.active = ACTIVE.replace(state.active);
+        JOBS.with_borrow_mut(|jobs| std::mem::swap(jobs, &mut state.jobs));
+        RUNNING.with_borrow_mut(|running| std::mem::swap(running, &mut state.running));
+    }
+
     /// A tessellation this slow is logged, with where it's from.
     const SLOW_MICROS: u64 = 20_000;
 

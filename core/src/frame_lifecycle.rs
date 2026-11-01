@@ -275,6 +275,13 @@ pub mod early_scripts {
         ALL_SCRIPTS.get()
     }
 
+    /// Turu: swaps one player's mark with the thread's (see `crate::PlayerThreadState`), so a
+    /// player whose code put a clip on the stage runs its early scripts itself, not the next
+    /// player on the thread.
+    pub fn swap(parented: &mut bool) {
+        *parented = PARENTED.replace(*parented);
+    }
+
     /// Whether `run` has something to look at (asked before a picture is drawn: some code
     /// between frames does not come through `Player::update`, a finished load for one).
     pub fn waiting() -> bool {
