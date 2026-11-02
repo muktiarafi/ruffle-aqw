@@ -26,6 +26,16 @@ thread_local! {
     static CUT_AT_DRAWS: Cell<u64> = const { Cell::new(0) };
 }
 
+/// Turu: segments finished and submitted together at most. On Metal, wgpu makes a command
+/// buffer of every pass (and of the barriers before it) when an encoder is finished, and they
+/// count against the queue's 4096 until submitted: a crowded frame with skill animations on
+/// (2000+ passes) ran out in one submit, which wgpu treats as a lost device ("the graphics
+/// driver stopped working"). A segment has about [`PASSES_PER_SEGMENT`] passes, so a batch
+/// stays far below that. (Mugetsu's D3D12 merges a pass's command buffers; Metal doesn't.)
+/// Only [`finish_in_batches`] batches: Mugetsu's present thread (Windows by default) finishes
+/// a frame's segments all at once.
+const SEGMENTS_PER_SUBMIT: usize = 16;
+
 /// Render passes per segment: enough to amortize per-encoder overhead, few enough that a
 /// heavy frame splits across all cores.
 const PASSES_PER_SEGMENT: u64 = 48;
@@ -94,12 +104,31 @@ pub fn cut_now(descriptors: &Descriptors, encoder: &mut wgpu::CommandEncoder) {
 
 /// Finishes all pending segments followed by `tail` (the encoder still being recorded into),
 /// in parallel, returning the command buffers in recording order for a single submit.
+///
+/// Turu: past [`SEGMENTS_PER_SUBMIT`], the earlier segments are finished and submitted here,
+/// a batch at a time, in order; the last batch is returned. The staging belt must be finished
+/// before this is called (as it always is), since the early batches reach the GPU first.
 pub fn finish_all(
     descriptors: &Descriptors,
     tail: wgpu::CommandEncoder,
 ) -> Vec<wgpu::CommandBuffer> {
-    let _ = descriptors;
-    finish_encoders(take_all(tail))
+    finish_in_batches(descriptors, take_all(tail))
+}
+
+/// Turu: [`finish_encoders`], past [`SEGMENTS_PER_SUBMIT`] finishing and submitting the
+/// earlier ones here, a batch at a time, in order; the last batch is returned (see
+/// [`finish_all`]). Also for a frame whose new shapes' uploads go ahead of it
+/// (`crate::shape_uploads`, on in Mugetsu's frontend).
+pub fn finish_in_batches(
+    descriptors: &Descriptors,
+    mut encoders: Vec<wgpu::CommandEncoder>,
+) -> Vec<wgpu::CommandBuffer> {
+    while encoders.len() > SEGMENTS_PER_SUBMIT {
+        let rest = encoders.split_off(SEGMENTS_PER_SUBMIT);
+        descriptors.queue.submit(finish_encoders(encoders));
+        encoders = rest;
+    }
+    finish_encoders(encoders)
 }
 
 /// Drops the segments recorded so far on this thread without submitting them: at shutdown

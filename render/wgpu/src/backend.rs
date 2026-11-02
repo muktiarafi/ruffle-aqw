@@ -2335,10 +2335,11 @@ impl ActiveFrame {
             None => frame,
         };
         let command_buffers = timers::time(timers::FINISH, || match uploads {
-            Some(uploads) => crate::segments::finish_encoders(crate::shape_uploads::ahead_of(
-                Some(uploads),
-                crate::segments::take_all(draw_encoder),
-            )),
+            // Turu: in batches (see `segments::SEGMENTS_PER_SUBMIT`).
+            Some(uploads) => crate::segments::finish_in_batches(
+                descriptors,
+                crate::shape_uploads::ahead_of(Some(uploads), crate::segments::take_all(draw_encoder)),
+            ),
             None => crate::segments::finish_all(descriptors, draw_encoder),
         });
         let index = timers::time(timers::SUBMIT, || {
@@ -2397,10 +2398,11 @@ impl ActiveFrame {
         );
         // AQW build: the new shapes' uploads go ahead of the frame (see `shape_uploads`).
         let command_buffers = match crate::shape_uploads::take(&self.uploads) {
-            Some(uploads) => crate::segments::finish_encoders(crate::shape_uploads::ahead_of(
-                Some(uploads),
-                crate::segments::take_all(draw_encoder),
-            )),
+            // Turu: in batches (see `segments::SEGMENTS_PER_SUBMIT`).
+            Some(uploads) => crate::segments::finish_in_batches(
+                descriptors,
+                crate::shape_uploads::ahead_of(Some(uploads), crate::segments::take_all(draw_encoder)),
+            ),
             None => crate::segments::finish_all(descriptors, draw_encoder),
         };
         let index = {
