@@ -38,8 +38,7 @@ pub struct ThreadState {
     segments: Vec<wgpu::CommandEncoder>,
     /// Passes and draws recorded since the last cut. Relative, not the totals at the cut: the
     /// totals count every player's passes, so a player swapped back in after others drew would
-    /// otherwise cut between nearly every pass (a new encoder each time; seven tabs reached
-    /// Metal's 4096 outstanding command buffers, which wgpu treats as a lost device).
+    /// otherwise cut between nearly every pass.
     since_cut: (u64, u64),
 }
 
@@ -64,10 +63,13 @@ fn rebase(now: (u64, u64), thread_cut: (u64, u64), since: (u64, u64)) -> ((u64, 
     )
 }
 
-/// Turu: pending segments at most; past this, recording goes on in the current encoder. Each
-/// unsubmitted segment holds one of Metal's 4096 command buffers, shared by every player, and a
-/// player that isn't drawn submits only every 100 offscreen draws.
-const MAX_PENDING_SEGMENTS: usize = 128;
+/// Turu: segments finished and submitted together at most. On Metal, wgpu makes a command
+/// buffer of every pass (and of the barriers before it) when an encoder is finished, and they
+/// count against the queue's 4096 until submitted: a crowded frame with skill animations on
+/// (2000+ passes) ran out in one submit, which wgpu treats as a lost device ("the graphics
+/// driver stopped working"). A segment has about [`PASSES_PER_SEGMENT`] passes, so a batch
+/// stays far below that. (Mugetsu's D3D12 merges a pass's command buffers; Metal doesn't.)
+const SEGMENTS_PER_SUBMIT: usize = 16;
 
 /// Render passes per segment: enough to amortize per-encoder overhead, few enough that a
 /// heavy frame splits across all cores.
@@ -102,9 +104,8 @@ pub fn maybe_cut(descriptors: &Descriptors, encoder: &mut wgpu::CommandEncoder) 
         return;
     }
     let now = cut_points();
-    if (now.0.saturating_sub(CUT_AT.with(Cell::get)) < PASSES_PER_SEGMENT
-        && now.1.saturating_sub(CUT_AT_DRAWS.with(Cell::get)) < DRAWS_PER_SEGMENT)
-        || pending_full()
+    if now.0.saturating_sub(CUT_AT.with(Cell::get)) < PASSES_PER_SEGMENT
+        && now.1.saturating_sub(CUT_AT_DRAWS.with(Cell::get)) < DRAWS_PER_SEGMENT
     {
         return;
     }
@@ -122,7 +123,7 @@ pub fn maybe_cut(descriptors: &Descriptors, encoder: &mut wgpu::CommandEncoder) 
 /// Cuts unconditionally (if enabled). For work that isn't counted in render passes, like the
 /// cacheAsBitmap/filter phase of a frame. Only call where no render pass is open.
 pub fn cut_now(descriptors: &Descriptors, encoder: &mut wgpu::CommandEncoder) {
-    if !enabled() || pending_full() {
+    if !enabled() {
         return;
     }
     set_cut(cut_points());
@@ -136,21 +137,28 @@ pub fn cut_now(descriptors: &Descriptors, encoder: &mut wgpu::CommandEncoder) {
     crate::perf_counters::inc(crate::perf_counters::SEGMENTS);
 }
 
-/// Turu: [`MAX_PENDING_SEGMENTS`] are waiting.
-fn pending_full() -> bool {
-    SEGMENTS.with(|s| s.borrow().len() >= MAX_PENDING_SEGMENTS)
-}
-
 /// Finishes all pending segments followed by `tail` (the encoder still being recorded into),
 /// in parallel, returning the command buffers in recording order for a single submit.
+///
+/// Turu: past [`SEGMENTS_PER_SUBMIT`], the earlier segments are finished and submitted here,
+/// a batch at a time, in order; the last batch is returned. The staging belt must be finished
+/// before this is called (as it always is), since the early batches reach the GPU first.
 pub fn finish_all(
     descriptors: &Descriptors,
     tail: wgpu::CommandEncoder,
 ) -> Vec<wgpu::CommandBuffer> {
-    let _ = descriptors;
     let mut encoders = SEGMENTS.with(|s| std::mem::take(&mut *s.borrow_mut()));
     set_cut(cut_points());
     encoders.push(tail);
+    while encoders.len() > SEGMENTS_PER_SUBMIT {
+        let rest = encoders.split_off(SEGMENTS_PER_SUBMIT);
+        descriptors.queue.submit(finish_batch(encoders));
+        encoders = rest;
+    }
+    finish_batch(encoders)
+}
+
+fn finish_batch(encoders: Vec<wgpu::CommandEncoder>) -> Vec<wgpu::CommandBuffer> {
     if encoders.len() == 1 {
         return encoders.into_iter().map(|e| e.finish()).collect();
     }
