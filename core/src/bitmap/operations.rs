@@ -1563,7 +1563,11 @@ pub fn draw<'gc>(
             write.set_gpu_dirty(context.gc(), sync_handle, dirty_region);
             Ok(())
         }
-        None => Err(BitmapDataDrawError::Unimplemented),
+        // Turu: of the renderers Turu builds, only the null one (a windowless player) can't
+        // draw offscreen. Leave the pixels as they are rather than throw: AQW's default settings
+        // draw the stage into a bitmap when a map loads, and the error stopped the code that
+        // makes your avatar, so the login never finished.
+        None => Ok(()),
     }
 }
 
