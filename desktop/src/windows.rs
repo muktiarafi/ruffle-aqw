@@ -102,9 +102,29 @@ pub(super) fn install_crash_handler() {
 unsafe extern "system" fn crash_filter(
     info: *const windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS,
 ) -> i32 {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
+    const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
+    const EXCEPTION_NONCONTINUABLE: u32 = 1;
     const EXCEPTION_ILLEGAL_INSTRUCTION: u32 = 0xC000_001D;
+
+    // Software exceptions whose code isn't a warning or an error (the top bit clear: "success"
+    // or "informational" severity) aren't crashes, but notifications that the code raising them
+    // expects to be ignored without a debugger. DirectX raises 0x87A and 0x87D in KERNELBASE.dll
+    // this way on some PCs (e.g. while Mugetsu closes), which used to show a "crashed" message.
+    // Carry on after the RaiseException call instead.
+    // SAFETY: Windows passes a valid EXCEPTION_POINTERS with a valid exception record.
+    let (code, flags) = unsafe {
+        let record = &*(*info).ExceptionRecord;
+        (record.ExceptionCode as u32, record.ExceptionFlags)
+    };
+    if code & 0x8000_0000 == 0 && flags & EXCEPTION_NONCONTINUABLE == 0 {
+        static IGNORED: AtomicU32 = AtomicU32::new(0);
+        if IGNORED.fetch_add(1, Ordering::Relaxed) < 10 {
+            tracing::warn!("Ignored a non-fatal exception 0x{code:08X}");
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
 
     static HANDLING: AtomicBool = AtomicBool::new(false);
     if HANDLING.swap(true, Ordering::SeqCst) {
@@ -115,11 +135,8 @@ unsafe extern "system" fn crash_filter(
         }
     }
 
-    // SAFETY: Windows passes a valid EXCEPTION_POINTERS with a valid exception record.
-    let (code, address) = unsafe {
-        let record = &*(*info).ExceptionRecord;
-        (record.ExceptionCode as u32, record.ExceptionAddress as usize)
-    };
+    // SAFETY: as above.
+    let address = unsafe { (*(*info).ExceptionRecord).ExceptionAddress as usize };
     let module = module_at(address);
     let in_mugetsu = module.as_ref().is_none_or(|module| module.is_main_exe);
     let file_name = module.as_ref().map_or_else(
