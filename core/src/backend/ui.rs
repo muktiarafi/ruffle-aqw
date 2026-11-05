@@ -136,6 +136,12 @@ pub trait UiBackend: Any {
     // Unused, but kept in case we need it later.
     fn message(&self, message: &str);
 
+    /// Turu: whether the screen is a touch screen, so the movie gets `TouchEvent`s for the
+    /// fingers that aren't the mouse (`Multitouch.supportsTouchEvents`, `Player::handle_touch`).
+    fn supports_touch_events(&self) -> bool {
+        false
+    }
+
     fn open_virtual_keyboard(&self);
 
     fn close_virtual_keyboard(&self);

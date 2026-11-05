@@ -2,7 +2,9 @@ package flash.events {
     import __ruffle__.stub_method;
 
     import flash.utils.ByteArray;
+    import flash.display.DisplayObject;
     import flash.display.InteractiveObject;
+    import flash.geom.Point;
 
     [API("667")]
     public class TouchEvent extends Event {
@@ -219,12 +221,21 @@ package flash.events {
             this._isRelatedObjectInaccessible = value;
         }
 
+        // Turu: from localX/localY and the target, as MouseEvent's are.
         public function get stageX():Number {
-            return this._stageX;
+            return this.stagePoint().x;
         }
 
         public function get stageY():Number {
-            return this._stageY;
+            return this.stagePoint().y;
+        }
+
+        private function stagePoint():Point {
+            var target:DisplayObject = this.target as DisplayObject;
+            if (target == null) {
+                return new Point(this._localX, this._localY);
+            }
+            return target.localToGlobal(new Point(this._localX, this._localY));
         }
     }
 }
