@@ -653,6 +653,14 @@ impl KeyCode {
     }
 }
 
+/// Turu: what a finger that isn't the mouse does (`Player::handle_touch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchPhase {
+    Begin,
+    Move,
+    End,
+}
+
 /// Subset of `KeyCode` that contains only mouse buttons.
 #[derive(Debug, EnumSetType)]
 pub enum MouseButton {

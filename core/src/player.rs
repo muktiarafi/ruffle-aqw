@@ -35,7 +35,7 @@ use crate::display_object::{
 };
 use crate::events::GamepadButton;
 use crate::events::PlayerNotification;
-use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, MouseButton, PlayerEvent};
+use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, MouseButton, PlayerEvent, TouchPhase};
 use crate::external::{ExternalInterface, ExternalInterfaceProvider, NullFsCommandProvider};
 use crate::external::{FsCommandProvider, Value as ExternalValue};
 use crate::focus_tracker::NavigationDirection;
@@ -1230,6 +1230,67 @@ impl Player {
             | PlayerEvent::TextInput { .. }
             | PlayerEvent::TextControl { .. } => self.handle_input_event(event),
         }
+    }
+
+    /// Turu: finger `id` that isn't the mouse (Flash's secondary touch point) at `x`, `y`
+    /// in window pixels, as a `TouchEvent` (`touchBegin`, `touchMove`, `touchEnd`, bubbling,
+    /// `isPrimaryTouchPoint` false) on the object under it, else the stage. Flash sends no mouse
+    /// events for such a finger. Only when the frontend `supports_touch_events`, and only for
+    /// AVM2 movies. Returns whether a listener got it.
+    pub fn handle_touch(&mut self, phase: TouchPhase, id: i32, x: f64, y: f64) -> bool {
+        if !self.ui.supports_touch_events() {
+            return false;
+        }
+        let point = self.mutate_with_update_context(|context| context.stage.inverse_view_matrix())
+            * Point::from_pixels(x, y);
+        // The pick and the event's local point go by the mouse's position.
+        let mouse = std::mem::replace(&mut self.mouse_position, point);
+        let handled = self.mutate_with_update_context(|context| {
+            let target = run_mouse_pick(context, false)
+                .map(|object| object.as_displayobject())
+                .unwrap_or_else(|| context.stage.into());
+            if !target.movie().is_action_script_3() {
+                return false;
+            }
+            let Some(object) = target.object2() else {
+                return false;
+            };
+            let event_type = match phase {
+                TouchPhase::Begin => "touchBegin",
+                TouchPhase::Move => "touchMove",
+                TouchPhase::End => "touchEnd",
+            };
+            let local = target.local_mouse_position(context);
+            let mut activation = Avm2Activation::from_nothing(context);
+            let class = activation.avm2().classes().touchevent;
+            let event_type = AvmString::new_utf8(activation.gc(), event_type);
+            let ctrl = activation.context.input.is_key_down(KeyCode::CONTROL);
+            let alt = activation.context.input.is_key_down(KeyCode::ALT);
+            let shift = activation.context.input.is_key_down(KeyCode::SHIFT);
+            let event = Avm2EventObject::from_class_and_args(
+                &mut activation,
+                class,
+                &[
+                    event_type.into(),
+                    true.into(),
+                    false.into(),
+                    id.into(),
+                    false.into(),
+                    local.x.to_pixels().into(),
+                    local.y.to_pixels().into(),
+                    f64::NAN.into(),
+                    f64::NAN.into(),
+                    f64::NAN.into(),
+                    crate::avm2::Value::Null,
+                    ctrl.into(),
+                    alt.into(),
+                    shift.into(),
+                ],
+            );
+            Avm2::dispatch_event(activation.context, event, object.into())
+        });
+        self.mouse_position = mouse;
+        handled
     }
 
     fn handle_focus_event(&mut self, event: PlayerEvent) -> bool {
