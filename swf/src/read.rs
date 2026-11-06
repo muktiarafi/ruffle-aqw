@@ -995,6 +995,46 @@ impl<'a> Reader<'a> {
     }
 
     pub fn read_define_font_2(&mut self, version: u8) -> Result<Font<'a>> {
+        Ok(self.read_define_font_2_with(version, true)?.0)
+    }
+
+    /// AQW build: DefineFont2/3 without parsing its glyphs' shapes: every glyph's
+    /// `shape_records` is empty, and the second value holds each glyph's shape data, in the
+    /// reader's data, to parse with [`Reader::read_glyph_shape`] when the glyph is needed.
+    pub fn read_define_font_2_without_shapes(
+        &mut self,
+        version: u8,
+    ) -> Result<(Font<'a>, Vec<&'a [u8]>)> {
+        self.read_define_font_2_with(version, false)
+    }
+
+    /// AQW build: a glyph's shape, from its data (see
+    /// [`Reader::read_define_font_2_without_shapes`]).
+    pub fn read_glyph_shape(data: &[u8], swf_version: u8) -> Result<Vec<ShapeRecord>> {
+        let mut reader = Reader::new(data, swf_version);
+        let num_bits = reader.read_u8()?;
+        let mut shape_context = ShapeContext {
+            swf_version,
+            shape_version: 1,
+            num_fill_bits: num_bits >> 4,
+            num_line_bits: num_bits & 0b1111,
+        };
+        let mut records = Vec::new();
+        let mut bits = reader.bits();
+        while let Some(record) = Self::read_shape_record(&mut bits, &mut shape_context)? {
+            records.push(record);
+        }
+        // AQW build: see `read_define_shape`.
+        records.shrink_to_fit();
+        Ok(records)
+    }
+
+    fn read_define_font_2_with(
+        &mut self,
+        version: u8,
+        parse_shapes: bool,
+    ) -> Result<(Font<'a>, Vec<&'a [u8]>)> {
+        let mut shape_data = Vec::new();
         let id = self.read_character_id()?;
         let flags = FontFlag::from_bits_truncate(self.read_u8()?);
         let language = self.read_language()?;
@@ -1047,6 +1087,19 @@ impl<'a> Reader<'a> {
 
             // GlyphShapeTable
             for (i, glyph) in glyphs.iter_mut().enumerate() {
+                if !parse_shapes {
+                    // AQW build: up to the next glyph's shape (or the code table), else to
+                    // the tag's end; the shape's end record stops the parse anyway.
+                    let start = (offsets[i] as usize).min(offsets_ref.len());
+                    let next = offsets.get(i + 1).copied().unwrap_or(code_table_offset) as usize;
+                    let end = if next >= start && next <= offsets_ref.len() {
+                        next
+                    } else {
+                        offsets_ref.len()
+                    };
+                    shape_data.push(&offsets_ref[start..end]);
+                    continue;
+                }
                 self.seek_absolute(offsets_ref, offsets[i] as usize);
 
                 let num_bits = self.read_u8()?;
@@ -1117,15 +1170,18 @@ impl<'a> Reader<'a> {
             None
         };
 
-        Ok(Font {
-            version,
-            id,
-            name,
-            language,
-            layout,
-            glyphs,
-            flags,
-        })
+        Ok((
+            Font {
+                version,
+                id,
+                name,
+                language,
+                layout,
+                glyphs,
+                flags,
+            },
+            shape_data,
+        ))
     }
 
     pub fn read_define_font_4(&mut self) -> Result<Font4<'a>> {
