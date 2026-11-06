@@ -3684,13 +3684,21 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
         version: u8,
     ) -> Result<(), Error> {
-        // AQW build: an identical shape tag parsed before is shared (see `shared_shapes`).
+        // AQW build: the shape is parsed when first needed (see `Graphic::from_swf_tag`). A tag
+        // outside this clip's data (not seen) is parsed now; an identical shape tag parsed
+        // before is shared (see `shared_shapes`).
         let bytes = reader.get_ref();
-        let swf_shape = crate::display_object::graphic::shared_shapes::parsed(bytes, version, || {
-            reader.read_define_shape(version)
-        })?;
-        let id = swf_shape.id;
-        let graphic = Graphic::from_swf_tag(context, swf_shape, self.movie());
+        let tag = self.swf_data.to_subslice(bytes);
+        let graphic = if tag.is_empty() {
+            let swf_shape =
+                crate::display_object::graphic::shared_shapes::parsed(bytes, version, || {
+                    reader.read_define_shape(version)
+                })?;
+            Graphic::from_parsed_shape(context, swf_shape, self.movie())
+        } else {
+            Graphic::from_swf_tag(context, tag, version, self.movie())?
+        };
+        let id = graphic.id();
         self.library_mut(context)
             .register_character(id, Character::Graphic(graphic));
         Ok(())

@@ -8,7 +8,7 @@ use crate::display_object::{BoundsMode, DisplayObjectBase};
 use crate::drawing::Drawing;
 use crate::library::MovieLibrarySource;
 use crate::prelude::*;
-use crate::tag_utils::SwfMovie;
+use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::tessellation_cache::{Measure, TessellationCache};
 use crate::vminterface::Instantiator;
 use core::fmt;
@@ -23,6 +23,7 @@ use ruffle_render::transform::Transform;
 use std::cell::{OnceCell, RefCell, RefMut};
 use std::rc::Rc;
 use std::sync::Arc;
+use swf::extensions::ReadSwfExt;
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
@@ -56,9 +57,44 @@ impl<'gc> Graphic<'gc> {
         Gc::erase(self.0.shared.get())
     }
 
-    /// Construct a `Graphic` from it's associated `Shape` tag.
-    /// AQW build: `swf_shape` may be shared with other graphics (see `shared_shapes`).
+    /// Construct a `Graphic` from its DefineShape tag (`tag`, the tag's body, of DefineShape
+    /// `version`).
+    ///
+    /// AQW build: only the tag's header (ID and bounds) is read now; the shape is parsed when
+    /// it's first drawn or hit-tested (see `GraphicShared::shape`). Every DefineShape of every
+    /// loaded SWF used to be parsed as the SWF loaded, drawn or not: a third of the heap after
+    /// some play (most shapes of maps, monsters and other players' gear are never drawn, and
+    /// none are without a window).
     pub fn from_swf_tag(
+        context: &mut UpdateContext<'gc>,
+        tag: SwfSlice,
+        version: u8,
+        movie: Arc<SwfMovie>,
+    ) -> Result<Self, swf::error::Error> {
+        let mut header = tag.read_from(0);
+        let id = header.read_u16()?;
+        let shape_bounds = header.read_rectangle()?;
+        let edge_bounds = if version >= 4 {
+            header.read_rectangle()?
+        } else {
+            shape_bounds.clone()
+        };
+        let shared = GraphicShared {
+            id,
+            shape: OnceCell::new(),
+            tag: Some((tag, version)),
+            shape_bounds,
+            edge_bounds,
+            movie,
+            scaled_handle: TessellationCache::new_shared(),
+            sliced: Default::default(),
+        };
+        Ok(Self::with_shared(context, shared))
+    }
+
+    /// Construct a `Graphic` from a parsed shape.
+    /// AQW build: `swf_shape` may be shared with other graphics (see `shared_shapes`).
+    pub fn from_parsed_shape(
         context: &mut UpdateContext<'gc>,
         swf_shape: Arc<swf::Shape>,
         movie: Arc<SwfMovie>,
@@ -69,12 +105,16 @@ impl<'gc> Graphic<'gc> {
             id: swf_shape.id,
             shape_bounds: swf_shape.shape_bounds.clone(),
             edge_bounds: swf_shape.edge_bounds.clone(),
-            shape: swf_shape,
+            shape: OnceCell::from(swf_shape),
+            tag: None,
             movie,
             scaled_handle: TessellationCache::new_shared(),
             sliced: Default::default(),
         };
+        Self::with_shared(context, shared)
+    }
 
+    fn with_shared(context: &mut UpdateContext<'gc>, shared: GraphicShared) -> Self {
         Graphic(Gc::new(
             context.gc(),
             GraphicData {
@@ -93,18 +133,12 @@ impl<'gc> Graphic<'gc> {
             id: 0,
             shape_bounds: Default::default(),
             edge_bounds: Default::default(),
-            shape: Arc::new(swf::Shape {
-                version: 32,
-                id: 0,
-                shape_bounds: Default::default(),
-                edge_bounds: Default::default(),
-                flags: swf::ShapeFlag::empty(),
-                styles: swf::ShapeStyles {
-                    fill_styles: Vec::new(),
-                    line_styles: Vec::new(),
-                },
-                shape: Vec::new(),
-            }),
+            shape: OnceCell::from(Arc::new(empty_shape(
+                0,
+                Default::default(),
+                Default::default(),
+            ))),
+            tag: None,
             movie: context.root_swf.clone(),
             scaled_handle: TessellationCache::new_shared(),
             sliced: Default::default(),
@@ -161,7 +195,7 @@ impl<'gc> Graphic<'gc> {
         Self::handle_for(
             context,
             &shared.movie,
-            &shared.shape,
+            shared.shape(),
             &shared.scaled_handle,
             current_scale,
         )
@@ -271,7 +305,7 @@ impl<'gc> Graphic<'gc> {
                     }
                     (
                         key,
-                        Arc::new(scale9::slice_shape(&shared.shape, &child_matrix, &slicing)),
+                        Arc::new(scale9::slice_shape(shared.shape(), &child_matrix, &slicing)),
                         TessellationCache::new_shared(),
                     )
                 }
@@ -398,7 +432,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                     recorder.shape(
                         &context.commands,
                         shared.movie.clone(),
-                        shared.shape.clone(),
+                        shared.shape().clone(),
                         shared.scaled_handle.clone(),
                     );
                 }
@@ -425,8 +459,12 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                     return true;
                 }
             } else {
-                let shape = &self.0.shared.get().shape;
-                return ruffle_render::shape_utils::shape_hit_test(shape, point, &local_matrix);
+                let shared = self.0.shared.get();
+                return ruffle_render::shape_utils::shape_hit_test(
+                    shared.shape(),
+                    point,
+                    &local_matrix,
+                );
             }
         }
 
@@ -472,7 +510,10 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 #[collect(require_static)]
 struct GraphicShared {
     id: CharacterId,
-    shape: Arc<swf::Shape>,
+    /// AQW build: parsed from `tag` when first needed (see `shape`).
+    shape: OnceCell<Arc<swf::Shape>>,
+    /// AQW build: the DefineShape tag's body and version, for `shape`.
+    tag: Option<(SwfSlice, u8)>,
     shape_bounds: Rectangle<Twips>,
     edge_bounds: Rectangle<Twips>,
     movie: Arc<SwfMovie>,
@@ -483,6 +524,51 @@ struct GraphicShared {
     /// `Graphic::sliced_handle`).
     #[collect(require_static)]
     sliced: RefCell<Vec<scale9::Entry>>,
+}
+
+impl GraphicShared {
+    /// AQW build: the shape, parsed from its tag the first time it's asked for (an identical
+    /// tag's parse if one is still in use, see `shared_shapes`). A tag that doesn't parse gives
+    /// an empty shape (it used to leave the character out).
+    fn shape(&self) -> &Arc<swf::Shape> {
+        self.shape.get_or_init(|| {
+            let parsed = self.tag.as_ref().map(|(tag, version)| {
+                shared_shapes::parsed(tag.data(), *version, || {
+                    tag.read_from(0).read_define_shape(*version)
+                })
+            });
+            if let Some(Err(e)) = &parsed {
+                tracing::error!("DefineShape {} didn't parse: {e}", self.id);
+            }
+            match parsed {
+                Some(Ok(shape)) => shape,
+                _ => Arc::new(empty_shape(
+                    self.id,
+                    self.shape_bounds.clone(),
+                    self.edge_bounds.clone(),
+                )),
+            }
+        })
+    }
+}
+
+fn empty_shape(
+    id: CharacterId,
+    shape_bounds: Rectangle<Twips>,
+    edge_bounds: Rectangle<Twips>,
+) -> swf::Shape {
+    swf::Shape {
+        version: 32,
+        id,
+        shape_bounds,
+        edge_bounds,
+        flags: swf::ShapeFlag::empty(),
+        styles: swf::ShapeStyles {
+            fill_styles: Vec::new(),
+            line_styles: Vec::new(),
+        },
+        shape: Vec::new(),
+    }
 }
 
 /// AQW build: parsed shapes shared between identical shape tags.
