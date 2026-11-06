@@ -12,6 +12,13 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 enum SwfGlyphOrShape {
+    /// AQW build: not parsed yet: the glyph's shape data in its DefineFont tag, the SWF's
+    /// version and the glyph's bounds (see `Glyph::from_swf_data`).
+    Unparsed {
+        data: crate::tag_utils::SwfSlice,
+        swf_version: u8,
+        bounds: Option<Rectangle<Twips>>,
+    },
     Glyph(swf::Glyph),
     Shape {
         shape: swf::Shape,
@@ -27,6 +34,27 @@ enum SwfGlyphOrShape {
 
 impl SwfGlyphOrShape {
     fn shape(&mut self) -> (&mut swf::Shape, &mut Option<(EdgeMode, ShapeHandle)>) {
+        if let Self::Unparsed {
+            data,
+            swf_version,
+            bounds,
+        } = self
+        {
+            let shape_records = if data.is_empty() {
+                Vec::new()
+            } else {
+                swf::read::Reader::read_glyph_shape(data.data(), *swf_version).unwrap_or_else(|e| {
+                    tracing::error!("A glyph's shape didn't parse: {e}");
+                    Vec::new()
+                })
+            };
+            *self = Self::Glyph(swf::Glyph {
+                shape_records,
+                code: 0,
+                advance: 0,
+                bounds: bounds.take(),
+            });
+        }
         if let Self::Glyph(_) = self
             && let Self::Glyph(glyph) = core::mem::replace(self, Self::Poisoned)
         {
@@ -174,6 +202,26 @@ impl Glyph {
         Self {
             advance: Twips::new(swf_glyph.advance.into()),
             shape: GlyphShape::Swf(Box::new(RefCell::new(SwfGlyphOrShape::Glyph(swf_glyph)))),
+            character,
+        }
+    }
+
+    /// AQW build: a glyph whose shape is parsed from `data` (its shape data in the DefineFont
+    /// tag, see `Reader::read_define_font_2_without_shapes`) when it's first drawn or
+    /// hit-tested. Fonts embedded in AQW's SWFs held ~15 MB of glyph shapes, most never used.
+    pub fn from_swf_data(
+        character: char,
+        swf_glyph: swf::Glyph,
+        data: crate::tag_utils::SwfSlice,
+        swf_version: u8,
+    ) -> Self {
+        Self {
+            advance: Twips::new(swf_glyph.advance.into()),
+            shape: GlyphShape::Swf(Box::new(RefCell::new(SwfGlyphOrShape::Unparsed {
+                data,
+                swf_version,
+                bounds: swf_glyph.bounds,
+            }))),
             character,
         }
     }
