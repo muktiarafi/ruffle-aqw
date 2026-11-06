@@ -1061,6 +1061,8 @@ impl<'a> Reader<'a> {
                 while let Some(record) = Self::read_shape_record(&mut bits, &mut shape_context)? {
                     glyph.shape_records.push(record);
                 }
+                // AQW build: see `read_define_shape`.
+                glyph.shape_records.shrink_to_fit();
             }
 
             self.seek_absolute(offsets_ref, code_table_offset as usize);
@@ -1505,6 +1507,9 @@ impl<'a> Reader<'a> {
         while let Some(record) = Self::read_shape_record(&mut bits, &mut shape_context)? {
             records.push(record);
         }
+        // AQW build: the vector doubles as it grows, so it held up to twice the records (a
+        // quarter of the parsed shapes' memory on average, kept as long as the shape is).
+        records.shrink_to_fit();
 
         Ok(Shape {
             version,
