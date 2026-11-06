@@ -86,7 +86,7 @@ impl<'gc> Graphic<'gc> {
             shape_bounds,
             edge_bounds,
             movie,
-            scaled_handle: TessellationCache::new_shared(),
+            scaled_handle: OnceCell::new(),
             sliced: Default::default(),
         };
         Ok(Self::with_shared(context, shared))
@@ -108,7 +108,7 @@ impl<'gc> Graphic<'gc> {
             shape: OnceCell::from(swf_shape),
             tag: None,
             movie,
-            scaled_handle: TessellationCache::new_shared(),
+            scaled_handle: OnceCell::new(),
             sliced: Default::default(),
         };
         Self::with_shared(context, shared)
@@ -140,7 +140,7 @@ impl<'gc> Graphic<'gc> {
             ))),
             tag: None,
             movie: *context.root_swf,
-            scaled_handle: TessellationCache::new_shared(),
+            scaled_handle: OnceCell::new(),
             sliced: Default::default(),
         };
 
@@ -200,7 +200,7 @@ impl<'gc> Graphic<'gc> {
             context,
             shared.movie,
             shared.shape(),
-            &shared.scaled_handle,
+            shared.scaled_handle(),
             current_scale,
         )
     }
@@ -440,7 +440,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                         &context.commands,
                         crate::library::Library::movie_addr(shared.movie),
                         shared.shape().clone(),
-                        shared.scaled_handle.clone(),
+                        shared.scaled_handle().clone(),
                     );
                 }
             }
@@ -532,9 +532,10 @@ struct GraphicShared<'gc> {
     #[collect(require_static)]
     edge_bounds: Rectangle<Twips>,
 
-    /// AQW build: shared with pending deferred tessellations (see `deferred_shapes`).
+    /// AQW build: shared with pending deferred tessellations (see `deferred_shapes`). Made on
+    /// the first draw (see `scaled_handle`).
     #[collect(require_static)]
-    scaled_handle: Rc<RefCell<TessellationCache>>,
+    scaled_handle: OnceCell<Rc<RefCell<TessellationCache>>>,
     /// AQW build: 9-slice scaled versions of the shape, least recently used first (see
     /// `Graphic::sliced_handle`).
     #[collect(require_static)]
@@ -542,6 +543,12 @@ struct GraphicShared<'gc> {
 }
 
 impl GraphicShared<'_> {
+    /// AQW build: the tessellations at the scales drawn at, made when first asked for: ~600
+    /// bytes per shape, and most shapes are never drawn (none are without a window).
+    fn scaled_handle(&self) -> &Rc<RefCell<TessellationCache>> {
+        self.scaled_handle.get_or_init(TessellationCache::new_shared)
+    }
+
     /// AQW build: the shape, parsed from its tag the first time it's asked for (an identical
     /// tag's parse if one is still in use, see `shared_shapes`). A tag that doesn't parse gives
     /// an empty shape (it used to leave the character out).
