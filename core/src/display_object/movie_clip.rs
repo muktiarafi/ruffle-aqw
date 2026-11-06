@@ -3993,15 +3993,7 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         context: &mut UpdateContext<'gc>,
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
-        let font = reader.read_define_font_2(2)?;
-        let font_id = font.id;
-        let font_object = Font::from_swf_tag(
-            context.gc(),
-            context.renderer,
-            font,
-            reader.encoding(),
-            FontType::Embedded,
-        );
+        let (font_id, font_object) = self.define_font_2_or_3(context, reader, 2)?;
         self.library_mut(context)
             .register_character(font_id, Character::Font(font_object));
         Ok(())
@@ -4013,18 +4005,52 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         context: &mut UpdateContext<'gc>,
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
-        let font = reader.read_define_font_2(3)?;
-        let font_id = font.id;
-        let font_object = Font::from_swf_tag(
-            context.gc(),
-            context.renderer,
-            font,
-            reader.encoding(),
-            FontType::Embedded,
-        );
+        let (font_id, font_object) = self.define_font_2_or_3(context, reader, 3)?;
         self.library_mut(context)
             .register_character(font_id, Character::Font(font_object));
         Ok(())
+    }
+
+    /// AQW build: DefineFont2/3 with its glyphs parsed when first used (see
+    /// `Font::from_swf_tag_lazy`), unless a glyph's data isn't in this clip's data (not seen).
+    fn define_font_2_or_3(
+        &self,
+        context: &mut UpdateContext<'gc>,
+        reader: &mut SwfStream<'a>,
+        version: u8,
+    ) -> Result<(CharacterId, Font<'gc>), Error> {
+        let bytes = reader.get_ref();
+        let (font, shape_data) = reader.read_define_font_2_without_shapes(version)?;
+        let shapes: Vec<SwfSlice> = shape_data
+            .iter()
+            .map(|data| self.swf_data.to_subslice(data))
+            .collect();
+        let all_found = shapes
+            .iter()
+            .zip(&shape_data)
+            .all(|(slice, data)| data.is_empty() || !slice.is_empty());
+        let font_id = font.id;
+        let font_object = if all_found {
+            Font::from_swf_tag_lazy(
+                context.gc(),
+                context.renderer,
+                font,
+                reader.encoding(),
+                FontType::Embedded,
+                (shapes, self.movie.version()),
+            )
+        } else {
+            let font =
+                swf::read::Reader::new(bytes, self.movie.version()).read_define_font_2(version)?;
+            Font::from_swf_tag(
+                context.gc(),
+                context.renderer,
+                font,
+                reader.encoding(),
+                FontType::Embedded,
+            )
+        };
+        Ok((font_id, font_object))
     }
 
     #[inline]

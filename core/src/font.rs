@@ -349,6 +349,35 @@ impl<'gc> Font<'gc> {
         encoding: &'static swf::Encoding,
         font_type: FontType,
     ) -> Font<'gc> {
+        Self::from_swf_tag_with(gc_context, renderer, tag, encoding, font_type, None)
+    }
+
+    /// AQW build: [`Font::from_swf_tag`] for a tag read without its glyphs' shapes
+    /// (`Reader::read_define_font_2_without_shapes`): `shapes` holds each glyph's shape data
+    /// and the SWF's version, and each glyph is parsed when first used (`Glyph::from_swf_data`).
+    pub fn from_swf_tag_lazy(
+        gc_context: &Mutation<'gc>,
+        renderer: &mut dyn RenderBackend,
+        tag: swf::Font,
+        encoding: &'static swf::Encoding,
+        font_type: FontType,
+        shapes: (Vec<crate::tag_utils::SwfSlice>, u8),
+    ) -> Font<'gc> {
+        Self::from_swf_tag_with(gc_context, renderer, tag, encoding, font_type, Some(shapes))
+    }
+
+    fn from_swf_tag_with(
+        gc_context: &Mutation<'gc>,
+        renderer: &mut dyn RenderBackend,
+        tag: swf::Font,
+        encoding: &'static swf::Encoding,
+        font_type: FontType,
+        shapes: Option<(Vec<crate::tag_utils::SwfSlice>, u8)>,
+    ) -> Font<'gc> {
+        let (mut shapes, swf_version) = match shapes {
+            Some((shapes, version)) => (Some(shapes.into_iter()), version),
+            None => (None, 0),
+        };
         let mut code_point_to_glyph = fnv::FnvHashMap::default();
 
         let descriptor = FontDescriptor::from_swf_tag(&tag, encoding);
@@ -368,6 +397,11 @@ impl<'gc> Font<'gc> {
                 //   We should probably rethink using Rust's char for Flash characters.
                 let character = char::from_u32(code as u32).unwrap_or(char::REPLACEMENT_CHARACTER);
                 code_point_to_glyph.insert(code, index);
+
+                // AQW build: a lazy glyph isn't parsed (nor eager-loaded) until it's used.
+                if let Some(data) = shapes.as_mut().and_then(Iterator::next) {
+                    return Glyph::from_swf_data(character, swf_glyph, data, swf_version);
+                }
 
                 let glyph = Glyph::from_swf(character, swf_glyph);
 
