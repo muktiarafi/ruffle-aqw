@@ -1,7 +1,6 @@
 use bytemuck::{AnyBitPattern, NoUninit};
 use std::ops::Range;
 use wgpu::BufferAddress;
-use wgpu::util::DeviceExt;
 
 pub struct BufferBuilder {
     inner: Vec<u8>,
@@ -85,11 +84,15 @@ impl BufferBuilder {
         label: Option<String>,
         usage: wgpu::BufferUsages,
     ) -> wgpu::Buffer {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: label.as_deref(),
-            contents: &self.inner,
-            usage,
-        })
+        // AQW build: without wgpu's panic when the GPU is out of memory.
+        crate::utils::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: label.as_deref(),
+                contents: &self.inner,
+                usage,
+            },
+        )
     }
 
     pub fn copy_to(
