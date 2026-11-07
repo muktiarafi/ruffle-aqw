@@ -5,6 +5,8 @@ use core::{mem, ops::Range};
 use hashbrown::hash_map::Entry;
 
 const ALLOCATION_GRANULARITY: u32 = 16;
+/// AQW build: the most free command buffers an encoder keeps after a reset (see `reset_all`).
+const MAX_FREE_COMMAND_BUFFERS: usize = ALLOCATION_GRANULARITY as usize;
 const DST_IMAGE_LAYOUT: vk::ImageLayout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
 
 impl super::Texture {
@@ -185,11 +187,23 @@ impl crate::CommandEncoder for super::CommandEncoder {
         for (_, framebuffer) in self.framebuffers.drain() {
             unsafe { self.device.raw.destroy_framebuffer(framebuffer, None) };
         }
-        let _ = unsafe {
-            self.device
-                .raw
-                .reset_command_pool(self.raw, vk::CommandPoolResetFlags::default())
+        // AQW build: an encoder kept every command buffer it ever used. AQW's frames record many
+        // render passes, each in a command buffer of its own, and encoders are pooled and never
+        // destroyed, so the count only grew with the busiest moment so far: 3900 live command
+        // buffers after a few minutes on Android, and drivers may keep memory for each until it's
+        // freed. Past `MAX_FREE_COMMAND_BUFFERS`, the rest are freed (then ~500 stayed live), and
+        // the pool's memory is released to the driver with the reset. (The Android emulator's
+        // driver still keeps a 1 MB stream per command buffer it ever had recording at once.)
+        // Everything here is done executing (`reset_all`'s contract).
+        let excess = self.free.len().saturating_sub(MAX_FREE_COMMAND_BUFFERS);
+        let flags = if excess > 0 {
+            let freed = self.free.split_off(self.free.len() - excess);
+            unsafe { self.device.raw.free_command_buffers(self.raw, &freed) };
+            vk::CommandPoolResetFlags::RELEASE_RESOURCES
+        } else {
+            vk::CommandPoolResetFlags::default()
         };
+        let _ = unsafe { self.device.raw.reset_command_pool(self.raw, flags) };
     }
 
     unsafe fn transition_buffers<'a, T>(&mut self, barriers: T)
