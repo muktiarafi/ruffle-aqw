@@ -241,21 +241,34 @@ pub fn capture_image<R, F: FnOnce(&[u8], u32) -> R>(
     index: Option<wgpu::SubmissionIndex>,
     with_rgba: F,
 ) -> R {
+    // AQW build: an image that can't be read back reads as transparent black instead of
+    // panicking: once the GPU dropped the device (`crate::device_lost`), the copy's submission
+    // failed, so waiting for it gave `WrongSubmissionIndex`, and its mapping may never finish
+    // (waiting for it would hang the player).
+    let empty = |with_rgba: F| {
+        let empty = vec![0; dimensions.padded_bytes_per_row as usize * dimensions.height];
+        with_rgba(&empty, dimensions.padded_bytes_per_row)
+    };
     let (sender, receiver) = std::sync::mpsc::channel();
     let buffer_slice = buffer.slice(..);
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        sender.send(result).unwrap();
+        // Nobody listens any more when the read gave up.
+        let _ = sender.send(result);
     });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: index,
-            timeout: None,
-        })
-        .expect("Device must not fail to poll");
-    let _ = receiver.recv().expect("MPSC channel must not fail");
-    let map = buffer_slice
-        .get_mapped_range()
-        .expect("Buffer slice must be mappable");
+    let polled = device.poll(wgpu::PollType::Wait {
+        submission_index: index,
+        timeout: None,
+    });
+    if polled.is_err() || crate::device_lost().is_some() {
+        return empty(with_rgba);
+    }
+    let mapped = match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(())) => buffer_slice.get_mapped_range().ok(),
+        _ => None,
+    };
+    let Some(map) = mapped else {
+        return empty(with_rgba);
+    };
     let result = with_rgba(&map, dimensions.padded_bytes_per_row);
     drop(map);
     buffer.unmap();
@@ -540,5 +553,31 @@ mod tests {
         );
         let error = futures::executor::block_on(scope.pop());
         assert!(error.is_some(), "the buffer should have failed");
+    }
+
+    /// On a lost device, polling doesn't panic (the wgpu-core patch) and reading a texture back
+    /// gives transparent black, not a panic.
+    #[test]
+    fn a_lost_device_neither_polls_nor_reads_back_with_a_panic() {
+        let Some((device, _queue)) = device() else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        // The work sent to the dead device reports errors; wgpu's default handler panics.
+        device.on_uncaptured_error(std::sync::Arc::new(|_| {}));
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 2,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        device.destroy();
+        assert!(device.poll(wgpu::PollType::Poll).is_ok());
+        assert!(device.poll(wgpu::PollType::wait_indefinitely()).is_ok());
+        let dimensions = super::BufferDimensions::new(2, 2, wgpu::TextureFormat::Rgba8Unorm);
+        let read =
+            super::capture_image(&device, &buffer, &dimensions, None, |rgba, _| rgba.to_vec());
+        assert_eq!(read.len(), dimensions.padded_bytes_per_row as usize * 2);
+        assert!(read.iter().all(|&byte| byte == 0));
     }
 }

@@ -1311,6 +1311,11 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         // AQW build: the last frame must reach the queue before this one's work (see
         // `crate::present`).
         self.ensure_presented();
+        // AQW build: the GPU dropped the device (`crate::device_lost`): nothing drawn would show,
+        // and every pass would only make errors.
+        if crate::device_lost().is_some() {
+            return;
+        }
         // AQW build: an allocation ran out of GPU memory since the last frame (see
         // `crate::gpu_oom`): make room before drawing this one.
         if crate::gpu_oom::take_pending() {
