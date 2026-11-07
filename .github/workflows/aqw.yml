@@ -1,0 +1,87 @@
+name: AQW
+
+# Turu's checks for the `aqw` branch (Ruffle with Mugetsu's AQW patches). Ruffle's own workflows
+# run only for `master`. This checks that a pull request is rebased on `aqw` and that the crates
+# Turu builds against still compile with Turu's features; Turu's CI runs the full app and tests
+# when its `ruffle/` submodule is bumped. Branch protection on `aqw` requires both jobs
+# (.github/CONTRIBUTING.md).
+on:
+  pull_request:
+    branches: [aqw]
+  push:
+    branches: [aqw]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aqw-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rebased:
+    name: Rebased on aqw
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      # The pull request's own commits, not the merge commit GitHub makes for it.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check the branch is rebased on aqw, without merge commits
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags origin "$BASE"
+          if ! git merge-base --is-ancestor "origin/$BASE" HEAD; then
+            echo "::error::The branch is behind $BASE. Rebase it: git fetch origin && git rebase origin/$BASE && git push --force-with-lease"
+            exit 1
+          fi
+          merges=$(git rev-list --merges "origin/$BASE..HEAD")
+          if [[ -n "$merges" ]]; then
+            echo "::error::The branch has merge commits ($(echo $merges | tr '\n' ' ')). Rebase instead of merging: git rebase origin/$BASE"
+            exit 1
+          fi
+          echo "Rebased on $BASE: $(git rev-list --count "origin/$BASE..HEAD") commit(s) on top"
+
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Ruffle compiles its Flash classes (playerglobal) with asc.jar.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: aqw-check
+          save-if: ${{ github.ref == 'refs/heads/aqw' }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $(cat .github/linux-dependencies.txt)
+
+      # The crates and features Turu's app/ and frontend/ use (turu's app/Cargo.toml), and
+      # Mugetsu's desktop frontend, which Turu's app/ follows.
+      - name: Check the crates Turu uses
+        run: |
+          cargo check --locked \
+            -p ruffle_core --features ruffle_core/audio,ruffle_core/mp3,ruffle_core/aac,ruffle_core/nellymoser,ruffle_core/default_compatibility_rules,ruffle_core/egui \
+            -p ruffle_render_wgpu \
+            -p ruffle_video_software \
+            -p ruffle_video_external --features ruffle_video_external/openh264 \
+            -p ruffle_frontend_utils --features ruffle_frontend_utils/cpal,ruffle_frontend_utils/fs,ruffle_frontend_utils/navigator \
+            -p ruffle_desktop
