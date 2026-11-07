@@ -215,3 +215,5 @@ gc-arena = { path = "patches/gc-arena" }
 # AQW build: a `Positive` fill rule for Flash-style edges (see render/src/tessellator.rs).
 lyon_path = { path = "patches/lyon_path" }
 lyon_algorithms = { path = "patches/lyon_algorithms" }
+# AQW build: a frame without a staging buffer skips egui's meshes instead of panicking.
+egui-wgpu = { path = "patches/egui-wgpu" }
