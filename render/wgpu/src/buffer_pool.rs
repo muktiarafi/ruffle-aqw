@@ -202,25 +202,50 @@ impl TexturePool {
         viewport_width: u32,
         viewport_height: u32,
     ) -> Arc<Globals> {
-        let (globals, last_used) = self
-            .globals_cache
-            .entry(GlobalsKey {
-                viewport_width,
-                viewport_height,
-            })
-            .or_insert_with(|| {
-                (
-                    Arc::new(Globals::new(
-                        &descriptors.device,
-                        &descriptors.bind_layouts.globals,
-                        viewport_width,
-                        viewport_height,
-                    )),
-                    0,
+        let key = GlobalsKey {
+            viewport_width,
+            viewport_height,
+        };
+        if let Some((globals, last_used)) = self.globals_cache.get_mut(&key) {
+            *last_used = self.frame;
+            return globals.clone();
+        }
+        // AQW build: if the GPU is out of memory for the buffer (phones, whose GPU shares the
+        // RAM), frees this pool's idle textures, lets the GPU release them and tries once more.
+        // One that still failed is used for this frame (it draws nothing) but not cached, so the
+        // next frame tries again.
+        let create = || {
+            crate::catch_out_of_memory(&descriptors.device, || {
+                Globals::new(
+                    &descriptors.device,
+                    &descriptors.bind_layouts.globals,
+                    viewport_width,
+                    viewport_height,
                 )
-            });
-        *last_used = self.frame;
-        globals.clone()
+            })
+        };
+        let (mut globals, mut out_of_memory) = create();
+        if out_of_memory {
+            tracing::warn!(
+                target: "ruffle_aqw_perf",
+                "GPU out of memory for the globals of a {viewport_width}x{viewport_height} target; freeing idle textures and retrying"
+            );
+            drop(globals);
+            self.clear_idle();
+            crate::release_gpu_memory(descriptors);
+            (globals, out_of_memory) = create();
+        }
+        let globals = Arc::new(globals);
+        if out_of_memory {
+            tracing::warn!(
+                target: "ruffle_aqw_perf",
+                "GPU still out of memory for the globals of a {viewport_width}x{viewport_height} target"
+            );
+        } else {
+            self.globals_cache
+                .insert(key, (globals.clone(), self.frame));
+        }
+        globals
     }
 
     /// AQW build: frees the textures (and cached globals) of sizes that weren't used in the

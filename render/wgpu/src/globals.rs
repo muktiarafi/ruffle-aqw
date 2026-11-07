@@ -1,7 +1,6 @@
 //use super::utils::create_debug_label;
 use bytemuck::{Pod, Zeroable};
 use ruffle_render::{matrix3d::Matrix3D, perspective_projection::PerspectiveProjection};
-use wgpu::util::DeviceExt;
 
 #[derive(Debug)]
 pub struct Globals {
@@ -68,11 +67,15 @@ impl Globals {
         let global_matrix: [[f32; 4]; 4] = bytemuck::cast(global_matrix.raw_data);
 
         let temp_label = create_debug_label!("Globals buffer");
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: temp_label.as_deref(),
-            contents: bytemuck::cast_slice(&[GlobalsUniform { global_matrix }]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        // AQW build: without wgpu's panic when the GPU is out of memory.
+        let buffer = crate::utils::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: temp_label.as_deref(),
+                contents: bytemuck::cast_slice(&[GlobalsUniform { global_matrix }]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
 
         let bind_group_label = create_debug_label!("Globals bind group");
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

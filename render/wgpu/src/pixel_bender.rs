@@ -13,7 +13,7 @@ use ruffle_render::pixel_bender::{
 };
 use ruffle_render::pixel_bender_support::{ImageInputTexture, PixelBenderShaderArgument};
 use smallvec::{SmallVec, smallvec_inline};
-use wgpu::util::{DeviceExt, StagingBelt};
+use wgpu::util::StagingBelt;
 use wgpu::{
     BindGroupEntry, BindingResource, BlendComponent, BufferDescriptor, BufferUsages,
     ColorTargetState, ColorWrites, CommandEncoder, PipelineLayout, RenderPipeline,
@@ -636,13 +636,15 @@ pub(super) fn run_pixelbender_shader_impl(
 
     staging_belt.finish();
 
-    let vertices = descriptors
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    // AQW build: without wgpu's panic when the GPU is out of memory.
+    let vertices = crate::utils::create_buffer_init(
+        &descriptors.device,
+        &wgpu::util::BufferInitDescriptor {
             label: create_debug_label!("Filter vertices").as_deref(),
             contents: bytemuck::cast_slice(&[source.vertices()]),
             usage: BufferUsages::VERTEX,
-        });
+        },
+    );
 
     let pipeline = compiled_shader.get_pipeline(descriptors, sample_count, target.format());
 

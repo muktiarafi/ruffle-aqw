@@ -2,7 +2,6 @@ use crate::buffer_pool::BufferDescription;
 use crate::descriptors::Descriptors;
 use crate::globals::Globals;
 use std::borrow::Cow;
-use wgpu::util::DeviceExt;
 use wgpu::{CommandEncoder, TextureFormat};
 
 macro_rules! create_debug_label {
@@ -79,11 +78,45 @@ pub fn create_buffer_with_data(
     usage: wgpu::BufferUsages,
     label: Option<String>,
 ) -> wgpu::Buffer {
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        usage,
-        label: label.as_deref(),
-        contents: data,
-    })
+    create_buffer_init(
+        device,
+        &wgpu::util::BufferInitDescriptor {
+            usage,
+            label: label.as_deref(),
+            contents: data,
+        },
+    )
+}
+
+/// AQW build: `wgpu::util::DeviceExt::create_buffer_init`, without its panic when the GPU is out
+/// of memory. wgpu's version maps the new buffer and `expect`s the mapping, but a buffer the GPU
+/// couldn't allocate is invalid and can't be mapped, so out-of-memory panicked there ("Failed to
+/// get mapped range for buffer created with mapped_at_creation"; phones with Mali GPUs, from
+/// `Globals::new`) before `gpu_oom`'s handler could tolerate it. Here an invalid buffer is
+/// returned unfilled: like any object that failed to allocate, using it only gives validation
+/// errors, which `gpu_oom` tolerates after an out-of-memory error.
+pub fn create_buffer_init(
+    device: &wgpu::Device,
+    descriptor: &wgpu::util::BufferInitDescriptor,
+) -> wgpu::Buffer {
+    // As wgpu's: a mapped buffer's size must be a multiple of COPY_BUFFER_ALIGNMENT, and above 0.
+    let unpadded_size = descriptor.contents.len() as wgpu::BufferAddress;
+    let align_mask = wgpu::COPY_BUFFER_ALIGNMENT - 1;
+    let padded_size = ((unpadded_size + align_mask) & !align_mask).max(wgpu::COPY_BUFFER_ALIGNMENT);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: descriptor.label,
+        size: padded_size,
+        usage: descriptor.usage,
+        mapped_at_creation: true,
+    });
+    if let Ok(mut range) = buffer.get_mapped_range_mut(..) {
+        range
+            .slice(..unpadded_size as usize)
+            .copy_from_slice(descriptor.contents);
+        drop(range);
+        buffer.unmap();
+    }
+    buffer
 }
 
 // Based off wgpu example 'capture'
@@ -307,5 +340,66 @@ impl<T> SampleCountMap<std::sync::OnceLock<T>> {
             16 => self.sixteen.get_or_init(init),
             _ => unreachable!("Sample counts must be powers of two between 1..=16"),
         }
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::create_buffer_init;
+
+    /// A device on this machine's GPU (or software adapter), `None` when there's none.
+    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            futures::executor::block_on(instance.request_adapter(&Default::default())).ok()?;
+        futures::executor::block_on(adapter.request_device(&Default::default())).ok()
+    }
+
+    #[test]
+    fn create_buffer_init_fills_the_buffer() {
+        let Some((device, _queue)) = device() else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        // 5 bytes: padded to 8, as wgpu's own does.
+        let buffer = create_buffer_init(
+            &device,
+            &wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[1, 2, 3, 4, 5],
+                usage: wgpu::BufferUsages::MAP_READ,
+            },
+        );
+        assert_eq!(buffer.size(), 8);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |result| {
+            result.expect("mapped");
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("polled");
+        let data = buffer.get_mapped_range(..).expect("mapped range").to_vec();
+        assert_eq!(data, [1, 2, 3, 4, 5, 0, 0, 0]);
+    }
+
+    /// A buffer the GPU couldn't create (out of memory on a phone; here an invalid usage) is
+    /// returned unfilled, not a panic as with wgpu's `create_buffer_init`.
+    #[test]
+    fn create_buffer_init_survives_a_buffer_that_failed() {
+        let Some((device, _queue)) = device() else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _buffer = create_buffer_init(
+            &device,
+            &wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[0; 64],
+                // MAP_READ only goes with COPY_DST (without MAPPABLE_PRIMARY_BUFFERS).
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::UNIFORM,
+            },
+        );
+        let error = futures::executor::block_on(scope.pop());
+        assert!(error.is_some(), "the buffer should have failed");
     }
 }
