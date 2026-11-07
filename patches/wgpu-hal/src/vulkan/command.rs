@@ -5,6 +5,8 @@ use core::{mem, ops::Range};
 use hashbrown::hash_map::Entry;
 
 const ALLOCATION_GRANULARITY: u32 = 16;
+/// AQW build: the most free command buffers an encoder keeps after a reset (see `reset_all`).
+const MAX_FREE_COMMAND_BUFFERS: usize = ALLOCATION_GRANULARITY as usize;
 const DST_IMAGE_LAYOUT: vk::ImageLayout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
 
 impl super::Texture {
@@ -256,7 +258,26 @@ impl crate::CommandEncoder for super::CommandEncoder {
         }
         // AQW build: the test switches of `crate::aqw_pool_test` (all off by default).
         let test = crate::aqw_pool_test();
-        let flags = if test.release {
+        // Turu: an encoder kept every command buffer it ever used. AQW's frames record many
+        // render passes, each in a command buffer of its own, and encoders are pooled and never
+        // destroyed, so the count only grew with the busiest moment so far: 3900 live command
+        // buffers after a few minutes on Android, and drivers may keep memory for each until it's
+        // freed. Past `MAX_FREE_COMMAND_BUFFERS`, the rest are freed (then ~500 stayed live), and
+        // the pool's memory is released to the driver with the reset. (The Android emulator's
+        // driver still keeps a 1 MB stream per command buffer it ever had recording at once.)
+        // Everything here is done executing (`reset_all`'s contract).
+        let excess = self.free.len().saturating_sub(MAX_FREE_COMMAND_BUFFERS);
+        // (On by default, before Mugetsu's switches, which stay as they are.)
+        if excess > 0 {
+            let freed = self.free.split_off(self.free.len() - excess);
+            unsafe { self.device.raw.free_command_buffers(self.raw, &freed) };
+            let _ = crate::AQW_COMMAND_BUFFERS.try_update(
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+                |count| Some(count.saturating_sub(excess)),
+            );
+        }
+        let flags = if excess > 0 || test.release {
             vk::CommandPoolResetFlags::RELEASE_RESOURCES
         } else {
             vk::CommandPoolResetFlags::default()
