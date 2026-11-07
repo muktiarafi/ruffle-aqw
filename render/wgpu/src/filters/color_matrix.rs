@@ -155,12 +155,22 @@ impl ColorMatrixFilter {
             draw_encoder,
         );
         let source_view = source.texture.create_view(&Default::default());
-        staging_belt
-            .write_buffer(draw_encoder, &self.uniform_buffer, 0, self.uniform_size)
-            .copy_from_slice(bytemuck::cast_slice(&filter.matrix));
-        staging_belt
-            .write_buffer(draw_encoder, &self.vertex_buffer, 0, self.vertices_size)
-            .copy_from_slice(bytemuck::cast_slice(&[source.vertices()]));
+        crate::utils::staging_write(
+            &mut *staging_belt,
+            draw_encoder,
+            &self.uniform_buffer,
+            0,
+            self.uniform_size,
+        )
+        .copy_from_slice(bytemuck::cast_slice(&filter.matrix));
+        crate::utils::staging_write(
+            &mut *staging_belt,
+            draw_encoder,
+            &self.vertex_buffer,
+            0,
+            self.vertices_size,
+        )
+        .copy_from_slice(bytemuck::cast_slice(&[source.vertices()]));
         let filter_group = descriptors
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {

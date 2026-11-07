@@ -351,16 +351,14 @@ impl FilterBatch {
                 }
                 let previous_view = if first { &source_view } else { flip.color_view() };
                 first = false;
-                staging_belt
-                    .write_buffer(
-                        draw_encoder,
-                        &self.instances,
-                        0,
-                        wgpu::BufferSize::new(
-                            (instances.len() * size_of::<BlurInstance>()) as u64,
-                        )
+                crate::utils::staging_write(
+                    &mut *staging_belt,
+                    draw_encoder,
+                    &self.instances,
+                    0,
+                    wgpu::BufferSize::new((instances.len() * size_of::<BlurInstance>()) as u64)
                         .expect("at least one slot"),
-                    )
+                )
                     .copy_from_slice(bytemuck::cast_slice(&instances));
                 let bind_group = descriptors
                     .device
@@ -439,14 +437,14 @@ impl FilterBatch {
                 }
             })
             .collect();
-        staging_belt
-            .write_buffer(
-                draw_encoder,
-                &self.instances,
-                0,
-                wgpu::BufferSize::new((instances.len() * size_of::<GlowInstance>()) as u64)
-                    .expect("at least one slot"),
-            )
+        crate::utils::staging_write(
+            &mut *staging_belt,
+            draw_encoder,
+            &self.instances,
+            0,
+            wgpu::BufferSize::new((instances.len() * size_of::<GlowInstance>()) as u64)
+                .expect("at least one slot"),
+        )
             .copy_from_slice(bytemuck::cast_slice(&instances));
         let target = Self::new_page_target(descriptors, texture_pool, draw_encoder, page);
         let source_view = source.create_view(&Default::default());

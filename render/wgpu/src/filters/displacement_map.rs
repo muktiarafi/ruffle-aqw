@@ -195,36 +195,46 @@ impl DisplacementMapFilter {
         let map_handle = filter.map_bitmap.clone()?;
         let map_texture = as_texture(&map_handle);
         let map_view = map_texture.texture.create_view(&Default::default());
-        staging_belt
-            .write_buffer(draw_encoder, &self.uniform_buffer, 0, self.uniform_size)
-            .copy_from_slice(bytemuck::cast_slice(&[DisplacementMapUniform {
-                color: [
-                    f32::from(filter.color.r) / 255.0,
-                    f32::from(filter.color.g) / 255.0,
-                    f32::from(filter.color.b) / 255.0,
-                    f32::from(filter.color.a) / 255.0,
-                ],
-                components: ((filter.component_x as u32) << 8) | (filter.component_y as u32),
-                mode: match filter.mode {
-                    DisplacementMapFilterMode::Wrap => 0,
-                    DisplacementMapFilterMode::Clamp => 1,
-                    DisplacementMapFilterMode::Ignore => 2,
-                    DisplacementMapFilterMode::Color => 3,
-                },
-                scale_x: filter.scale_x,
-                scale_y: filter.scale_y,
-                source_width: source.texture.width() as f32,
-                source_height: source.texture.height() as f32,
-                map_width: map_texture.texture.width() as f32,
-                map_height: map_texture.texture.height() as f32,
-                offset_x: filter.map_point.0 as f32,
-                offset_y: filter.map_point.1 as f32,
-                viewscale_x: filter.viewscale_x,
-                viewscale_y: filter.viewscale_y,
-            }]));
-        staging_belt
-            .write_buffer(draw_encoder, &self.vertex_buffer, 0, self.vertices_size)
-            .copy_from_slice(bytemuck::cast_slice(&[source.vertices()]));
+        crate::utils::staging_write(
+            &mut *staging_belt,
+            draw_encoder,
+            &self.uniform_buffer,
+            0,
+            self.uniform_size,
+        )
+        .copy_from_slice(bytemuck::cast_slice(&[DisplacementMapUniform {
+            color: [
+                f32::from(filter.color.r) / 255.0,
+                f32::from(filter.color.g) / 255.0,
+                f32::from(filter.color.b) / 255.0,
+                f32::from(filter.color.a) / 255.0,
+            ],
+            components: ((filter.component_x as u32) << 8) | (filter.component_y as u32),
+            mode: match filter.mode {
+                DisplacementMapFilterMode::Wrap => 0,
+                DisplacementMapFilterMode::Clamp => 1,
+                DisplacementMapFilterMode::Ignore => 2,
+                DisplacementMapFilterMode::Color => 3,
+            },
+            scale_x: filter.scale_x,
+            scale_y: filter.scale_y,
+            source_width: source.texture.width() as f32,
+            source_height: source.texture.height() as f32,
+            map_width: map_texture.texture.width() as f32,
+            map_height: map_texture.texture.height() as f32,
+            offset_x: filter.map_point.0 as f32,
+            offset_y: filter.map_point.1 as f32,
+            viewscale_x: filter.viewscale_x,
+            viewscale_y: filter.viewscale_y,
+        }]));
+        crate::utils::staging_write(
+            &mut *staging_belt,
+            draw_encoder,
+            &self.vertex_buffer,
+            0,
+            self.vertices_size,
+        )
+        .copy_from_slice(bytemuck::cast_slice(&[source.vertices()]));
         let filter_group = descriptors
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {

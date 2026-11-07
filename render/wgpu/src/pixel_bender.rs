@@ -407,7 +407,8 @@ pub(super) fn run_pixelbender_shader_impl(
         },
     ];
 
-    let mut zeroed_out_of_range_mode_slice = staging_belt.write_buffer(
+    let mut zeroed_out_of_range_mode_slice = crate::utils::staging_write(
+        &mut *staging_belt,
         render_command_encoder,
         &compiled_shader.zeroed_out_of_range_mode,
         0,
@@ -588,7 +589,8 @@ pub(super) fn run_pixelbender_shader_impl(
                     res
                 };
 
-                let mut buffer_slice = staging_belt.write_buffer(
+                let mut buffer_slice = crate::utils::staging_write(
+                    &mut *staging_belt,
                     render_command_encoder,
                     buffer,
                     vec4_count as u64 * 4 * component_size_bytes,
