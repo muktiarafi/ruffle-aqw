@@ -217,27 +217,37 @@ impl BevelFilter {
         shadow_color[0] *= shadow_color[3];
         shadow_color[1] *= shadow_color[3];
         shadow_color[2] *= shadow_color[3];
-        staging_belt
-            .write_buffer(draw_encoder, &self.uniform_buffer, 0, self.uniform_size)
-            .copy_from_slice(bytemuck::cast_slice(&[BevelUniform {
-                highlight_color,
-                shadow_color,
-                strength: filter.strength.to_f32(),
-                bevel_type: if filter.is_on_top() {
-                    2
-                } else if filter.is_inner() {
-                    1
-                } else {
-                    0
-                },
-                knockout: if filter.is_knockout() { 1 } else { 0 },
-                composite_source: 1,
-            }]));
-        staging_belt
-            .write_buffer(draw_encoder, &self.vertex_buffer, 0, self.vertices_size)
-            .copy_from_slice(bytemuck::cast_slice(&[
-                source.vertices_with_highlight_and_shadow(blur_offset)
-            ]));
+        crate::utils::staging_write(
+            &mut *staging_belt,
+            draw_encoder,
+            &self.uniform_buffer,
+            0,
+            self.uniform_size,
+        )
+        .copy_from_slice(bytemuck::cast_slice(&[BevelUniform {
+            highlight_color,
+            shadow_color,
+            strength: filter.strength.to_f32(),
+            bevel_type: if filter.is_on_top() {
+                2
+            } else if filter.is_inner() {
+                1
+            } else {
+                0
+            },
+            knockout: if filter.is_knockout() { 1 } else { 0 },
+            composite_source: 1,
+        }]));
+        crate::utils::staging_write(
+            &mut *staging_belt,
+            draw_encoder,
+            &self.vertex_buffer,
+            0,
+            self.vertices_size,
+        )
+        .copy_from_slice(bytemuck::cast_slice(&[
+            source.vertices_with_highlight_and_shadow(blur_offset)
+        ]));
         let filter_group = descriptors
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {

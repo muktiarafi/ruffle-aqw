@@ -254,12 +254,24 @@ impl BufferArena {
         drop(inner);
 
         let data_start = start.next_multiple_of(multiple);
-        let mut view = staging_belt.write_buffer(
+        // AQW build: made first, so that if the staging write fails, dropping it gives the range
+        // back to the arena; `Err` then frees idle textures and retries (`alloc_shape_buffers`).
+        let slice = ArenaSlice {
+            buffer: buffer.clone(),
+            range: start..start + size,
+            data_start,
+            chunk: chunk_index,
+            arena: Arc::downgrade(&self.inner),
+        };
+        let Some(mut view) = crate::utils::try_staging_write(
+            staging_belt,
             encoder,
             &buffer,
             start,
             wgpu::BufferSize::new(size).expect("data is not empty"),
-        );
+        ) else {
+            return Err(ArenaOutOfMemory);
+        };
         if data.len() as wgpu::BufferAddress == size {
             view.copy_from_slice(data);
         } else {
@@ -269,13 +281,7 @@ impl BufferArena {
             view.copy_from_slice(&padded);
         }
         drop(view);
-        Ok(Some(ArenaSlice {
-            buffer,
-            range: start..start + size,
-            data_start,
-            chunk: chunk_index,
-            arena: Arc::downgrade(&self.inner),
-        }))
+        Ok(Some(slice))
     }
 
     /// Call once per rendered frame (after submitting it): ranges freed long enough ago
