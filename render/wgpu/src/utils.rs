@@ -137,10 +137,24 @@ pub fn try_staging_write(
         wgpu::BufferSize::new(wgpu::COPY_BUFFER_ALIGNMENT).expect("not 0"),
     );
     let Ok(view) = staged.get_mapped_range_mut() else {
-        tracing::warn!(
-            target: "ruffle_aqw_perf",
-            "GPU staging buffer unavailable for {size} bytes; that write is skipped"
-        );
+        // At most one line a few seconds: a frame out of memory skips hundreds of writes, and
+        // on Android each warning is a Sentry breadcrumb (a burst filled the last 100).
+        static SKIPPED: std::sync::Mutex<(Option<std::time::Instant>, u32)> =
+            std::sync::Mutex::new((None, 0));
+        if let Ok(mut skipped) = SKIPPED.lock() {
+            skipped.1 += 1;
+            if skipped
+                .0
+                .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(5))
+            {
+                tracing::warn!(
+                    target: "ruffle_aqw_perf",
+                    "GPU staging buffer unavailable ({} writes skipped since the last report, this one {size} bytes)",
+                    skipped.1
+                );
+                *skipped = (Some(std::time::Instant::now()), 0);
+            }
+        }
         crate::gpu_oom::note();
         return None;
     };
