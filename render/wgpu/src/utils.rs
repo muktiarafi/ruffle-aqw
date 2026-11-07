@@ -119,6 +119,65 @@ pub fn create_buffer_init(
     buffer
 }
 
+/// AQW build: `StagingBelt::write_buffer`, without its panic. wgpu's version `expect`s the
+/// staging buffer's mapping, but a staging buffer the GPU couldn't allocate is invalid (and one
+/// has also come back "destroyed"), so phones out of GPU memory crashed there (Redmi 10 2022,
+/// Infinix HOT 11S, from `BufferArena::alloc_at_multiple`). Here the copy into `target` is only
+/// recorded once the staging space is mapped; `None` when it couldn't be, as an out-of-memory
+/// error (`gpu_oom` then tolerates what follows).
+pub fn try_staging_write(
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::Buffer,
+    offset: wgpu::BufferAddress,
+    size: wgpu::BufferSize,
+) -> Option<wgpu::BufferViewMut> {
+    let staged = staging_belt.allocate(
+        size,
+        wgpu::BufferSize::new(wgpu::COPY_BUFFER_ALIGNMENT).expect("not 0"),
+    );
+    let Ok(view) = staged.get_mapped_range_mut() else {
+        tracing::warn!(
+            target: "ruffle_aqw_perf",
+            "GPU staging buffer unavailable for {size} bytes; that write is skipped"
+        );
+        crate::gpu_oom::note();
+        return None;
+    };
+    encoder.copy_buffer_to_buffer(staged.buffer(), staged.offset(), target, offset, size.get());
+    Some(view)
+}
+
+/// AQW build: [`try_staging_write`] for data written again every frame (uniforms, instances,
+/// the frame's transforms): when the staging space couldn't be had, the write is skipped and
+/// that frame may draw wrong, instead of a crash.
+pub fn staging_write(
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::Buffer,
+    offset: wgpu::BufferAddress,
+    size: wgpu::BufferSize,
+) -> StagingWrite {
+    StagingWrite(try_staging_write(
+        staging_belt,
+        encoder,
+        target,
+        offset,
+        size,
+    ))
+}
+
+/// A write into staging space, or nowhere when there was none (see [`staging_write`]).
+pub struct StagingWrite(Option<wgpu::BufferViewMut>);
+
+impl StagingWrite {
+    pub fn copy_from_slice(&mut self, data: &[u8]) {
+        if let Some(view) = &mut self.0 {
+            view.copy_from_slice(data);
+        }
+    }
+}
+
 // Based off wgpu example 'capture'
 #[derive(Debug, Clone)]
 pub struct BufferDimensions {
@@ -379,6 +438,72 @@ mod tests {
             .expect("polled");
         let data = buffer.get_mapped_range(..).expect("mapped range").to_vec();
         assert_eq!(data, [1, 2, 3, 4, 5, 0, 0, 0]);
+    }
+
+    #[test]
+    fn try_staging_write_copies_into_the_target() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let target = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut belt = wgpu::util::StagingBelt::new(device.clone(), 64);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut view = super::try_staging_write(
+            &mut belt,
+            &mut encoder,
+            &target,
+            0,
+            wgpu::BufferSize::new(8).unwrap(),
+        )
+        .expect("staged");
+        view.copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        drop(view);
+        belt.finish();
+        queue.submit([encoder.finish()]);
+        target.slice(..).map_async(wgpu::MapMode::Read, |result| {
+            result.expect("mapped");
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("polled");
+        let data = target.get_mapped_range(..).expect("mapped range").to_vec();
+        assert_eq!(data, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    /// A staging buffer the GPU couldn't create (out of memory on a phone; here larger than any
+    /// buffer may be) gives `None`, not a panic as with wgpu's `StagingBelt::write_buffer`.
+    #[test]
+    fn try_staging_write_survives_a_staging_buffer_that_failed() {
+        let Some((device, _queue)) = device() else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let target = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let too_big = device.limits().max_buffer_size.next_multiple_of(4) + 4;
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut belt = wgpu::util::StagingBelt::new(device.clone(), 64);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let view = super::try_staging_write(
+            &mut belt,
+            &mut encoder,
+            &target,
+            0,
+            wgpu::BufferSize::new(too_big).unwrap(),
+        );
+        assert!(view.is_none());
+        let error = futures::executor::block_on(scope.pop());
+        assert!(error.is_some(), "the staging buffer should have failed");
     }
 
     /// A buffer the GPU couldn't create (out of memory on a phone; here an invalid usage) is
