@@ -704,12 +704,38 @@ pub(crate) mod gpu_oom {
     static PENDING: AtomicBool = AtomicBool::new(false);
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     static LOGGED: AtomicU32 = AtomicU32::new(0);
+    /// Why the device was lost, once it was.
+    static LOST: Mutex<Option<String>> = Mutex::new(None);
+
+    /// Why the GPU device was lost ("Unknown: ..."), or `None` while it works. Once lost, it
+    /// stays lost: frames aren't drawn and GPU errors are tolerated.
+    pub fn device_lost() -> Option<String> {
+        LOST.lock().ok().and_then(|lost| lost.clone())
+    }
 
     /// How long after an out-of-memory error its follow-up validation errors are tolerated.
     const TOLERANCE: Duration = Duration::from_secs(3);
 
     pub fn install_error_handler(device: &wgpu::Device) {
+        // AQW build: the GPU can drop the device (wgpu loses it when the driver runs out of
+        // memory, on phones with 4 GB). Nothing drawn after that shows, but the game and its
+        // scripts keep running: remember it, so the app stops drawing and tells the user, and
+        // tolerate the errors of the work still sent to the dead device.
+        device.set_device_lost_callback(|reason, message| {
+            // Inside wgpu, possibly with its locks held: only remember it.
+            if let Ok(mut lost) = LOST.lock()
+                && lost.is_none()
+            {
+                *lost = Some(format!("{reason:?}: {message}"));
+            }
+        });
         device.on_uncaptured_error(Arc::new(|error: wgpu::Error| {
+            if device_lost().is_some() {
+                if LOGGED.fetch_add(1, Ordering::Relaxed) < 50 {
+                    tracing::warn!(target: "ruffle_aqw_perf", "GPU error tolerated (device lost): {error}");
+                }
+                return;
+            }
             let recent = LAST
                 .lock()
                 .ok()
@@ -743,6 +769,13 @@ pub(crate) mod gpu_oom {
     pub fn take_pending() -> bool {
         PENDING.swap(false, Ordering::Relaxed)
     }
+}
+
+/// AQW build: why the GPU device was lost, or `None` while it works (see `gpu_oom`). After a
+/// loss the renderer draws nothing, and the app should neither draw its own UI on that device
+/// nor wait on it.
+pub fn device_lost() -> Option<String> {
+    gpu_oom::device_lost()
 }
 
 /// AQW build: while `true` (the GPU's memory is nearly full), the texture pools keep at most

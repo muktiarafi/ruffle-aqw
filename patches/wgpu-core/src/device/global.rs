@@ -1806,6 +1806,15 @@ impl Global {
 
         closures.fire();
 
+        // AQW build: polling a lost device isn't an error. wgpu turns any poll error but a
+        // timeout into a panic ("Error in Device::poll: ... Parent device is lost"), which aborted
+        // phones whose GPU dropped the device (out of memory). A lost device finishes nothing
+        // more, so there's nothing left to wait for; the work in flight is gone, and its
+        // mappings' callbacks fire with errors. The device-lost callback tells the app.
+        if matches!(result, Err(WaitIdleError::Device(DeviceError::Lost))) {
+            return Ok(wgt::PollStatus::QueueEmpty);
+        }
+
         result
     }
 

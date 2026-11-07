@@ -1268,6 +1268,11 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        // AQW build: the GPU dropped the device (`crate::device_lost`): nothing drawn would show,
+        // and every pass would only make errors.
+        if crate::device_lost().is_some() {
+            return;
+        }
         // AQW build: an allocation ran out of GPU memory since the last frame (see
         // `crate::gpu_oom`): make room before drawing this one.
         if crate::gpu_oom::take_pending() {
