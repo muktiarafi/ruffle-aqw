@@ -127,6 +127,8 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     viewport_scale_factor: f64,
     texture_pool: TexturePool,
     offscreen_texture_pool: TexturePool,
+    /// AQW build: freed cacheAsBitmap textures, reused at the same size (see `TextureRecycler`).
+    cab_recycler: Arc<crate::TextureRecycler>,
     pub(crate) offscreen_buffer_pool: Arc<BufferPool<wgpu::Buffer, BufferDimensions>>,
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
@@ -429,6 +431,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             viewport_scale_factor: 1.0,
             texture_pool: TexturePool::new_counted(crate::perf_counters::LAYER_POOL_TAKE, crate::perf_counters::LAYER_POOL_NEW),
             offscreen_texture_pool: TexturePool::new_counted(crate::perf_counters::CACHE_POOL_TAKE, crate::perf_counters::CACHE_POOL_NEW),
+            cab_recycler: Default::default(),
             mesh_arena: crate::arena::BufferArena::new(
                 "Shape geometry",
                 wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
@@ -458,6 +461,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
     /// AQW build: frees every spare pooled texture and lets the GPU release the memory, for
     /// when the GPU's memory is nearly full (see Mugetsu's memory watch).
     pub fn aqw_trim_memory(&mut self) {
+        self.cab_recycler.clear();
         self.texture_pool.clear_idle();
         self.offscreen_texture_pool.clear_idle();
         crate::release_gpu_memory(&self.descriptors);
@@ -483,6 +487,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             return Some(texture);
         }
         drop(texture);
+        self.cab_recycler.clear();
         tracing::warn!(
             target: "ruffle_aqw_perf",
             "GPU out of memory for a {}x{} bitmap; freeing idle textures and retrying",
@@ -1452,6 +1457,14 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         }
         // AQW build: free layer/filter textures of sizes unused for ~10 s at 24 fps.
         self.texture_pool.end_frame(240);
+        // AQW build: cacheAsBitmap textures not reused within ~1 s, and within 64 MB (16 MB
+        // while the GPU's memory is nearly full; Android always says so).
+        let recycle_mb = if crate::buffer_pool::MEMORY_PRESSURE.load(std::sync::atomic::Ordering::Relaxed) {
+            16
+        } else {
+            64
+        };
+        self.cab_recycler.end_frame(24, recycle_mb << 20);
         self.mesh_arena.end_frame();
         self.uniform_arena.end_frame();
         self.profiler
@@ -1474,6 +1487,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         };
 
         let texture_label = create_debug_label!("Bitmap");
+        crate::perf_counters::inc(crate::perf_counters::BITMAP_NEW);
         let texture = self
             .create_texture_making_room(&wgpu::TextureDescriptor {
                 label: texture_label.as_deref(),
@@ -1508,6 +1522,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         );
 
         let handle = BitmapHandle(Arc::new(Texture {
+            recycle: None,
             live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
             texture,
             repeating_linear: Default::default(),
@@ -1789,6 +1804,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                             | wgpu::TextureUsages::COPY_SRC,
                     });
                 BitmapHandle(Arc::new(Texture {
+                    recycle: None,
                     live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
                     texture,
                     repeating_linear: Default::default(),
@@ -1934,24 +1950,36 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         let texture_label = create_debug_label!("Bitmap");
         // AQW build: only cacheAsBitmap uses this; those pictures are remade whenever their
-        // object changes size and freed with it, so they get GPU memory of their own.
-        let texture = crate::texture_kind(crate::CACHED_TEXTURES, || {
-            self.create_texture_making_room(&wgpu::TextureDescriptor {
-                label: texture_label.as_deref(),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::COPY_SRC,
+        // object changes size and freed with it, so they get GPU memory of their own, and a
+        // freed one of the same size is reused (`TextureRecycler`). Its old picture doesn't
+        // matter: a cache redraw clears or overwrites the whole texture.
+        let recycled = self.cab_recycler.take(width, height);
+        crate::perf_counters::inc(if recycled.is_some() {
+            crate::perf_counters::CAB_TEXTURE_REUSED
+        } else {
+            crate::perf_counters::CAB_TEXTURE_NEW
+        });
+        let texture = match recycled {
+            Some(texture) => texture,
+            None => crate::texture_kind(crate::CACHED_TEXTURES, || {
+                self.create_texture_making_room(&wgpu::TextureDescriptor {
+                    label: texture_label.as_deref(),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::COPY_SRC,
+                })
             })
-        })
-        .ok_or(BitmapError::TooLarge)?;
+            .ok_or(BitmapError::TooLarge)?,
+        };
         Ok(BitmapHandle(Arc::new(Texture {
+            recycle: Some(self.cab_recycler.clone()),
             live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
             texture,
             repeating_linear: Default::default(),

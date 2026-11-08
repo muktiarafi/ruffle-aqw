@@ -111,6 +111,7 @@ impl WgpuContext3D {
             });
 
             BitmapHandle(Arc::new(Texture {
+                recycle: None,
                 live: None,
                 repeating_linear: Default::default(),
                 repeating_nearest: Default::default(),
@@ -647,6 +648,7 @@ impl Context3D for WgpuContext3D {
                     // which is what the Stage rendering code expects. In multisample mode,
                     // this is our resolve texture.
                     self.back_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
+                        recycle: None,
                         live: None,
                         texture: back_buffer_resolve_texture.unwrap(),
                         repeating_linear: Default::default(),
@@ -656,6 +658,7 @@ impl Context3D for WgpuContext3D {
                         copy_count: Cell::new(0),
                     }));
                     self.front_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
+                        recycle: None,
                         live: None,
                         texture: front_buffer_resolve_texture.unwrap(),
                         repeating_linear: Default::default(),
@@ -669,6 +672,7 @@ impl Context3D for WgpuContext3D {
                     // so our main texture gets used as the raw texture handle.
 
                     self.back_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
+                        recycle: None,
                         live: None,
                         texture: back_buffer_texture,
                         repeating_linear: Default::default(),
@@ -678,6 +682,7 @@ impl Context3D for WgpuContext3D {
                         copy_count: Cell::new(0),
                     }));
                     self.front_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
+                        recycle: None,
                         live: None,
                         texture: front_buffer_texture,
                         repeating_linear: Default::default(),

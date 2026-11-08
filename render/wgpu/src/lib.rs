@@ -273,16 +273,92 @@ impl QueueSyncHandle {
     }
 }
 
+/// AQW build: cacheAsBitmap textures freed in the last frames, for `create_empty_texture` to
+/// reuse at the same size. A cached object that animates in size (glowing skill effects,
+/// weapons, capes, with filters the size steps can't round) frees its texture and asks for a new
+/// one whenever it changes size: 10-16 textures a frame in a crowded AQW room. Making a texture
+/// costs ~1 ms each on Android's Vulkan (6-9 ms of a 50 ms frame on the emulator), next to nothing
+/// on Metal; animations cycle through the same sizes, so most come back within a second. Each
+/// renderer has its own (its device's textures).
+#[derive(Debug, Default)]
+pub(crate) struct TextureRecycler {
+    inner: std::sync::Mutex<RecyclerInner>,
+}
+
+#[derive(Debug, Default)]
+struct RecyclerInner {
+    frame: u64,
+    /// The frame each was freed in, and the texture.
+    idle: Vec<(u64, wgpu::Texture)>,
+}
+
+impl TextureRecycler {
+    fn put(&self, texture: wgpu::Texture) {
+        if let Ok(mut inner) = self.inner.lock() {
+            let frame = inner.frame;
+            inner.idle.push((frame, texture));
+        }
+    }
+
+    /// A freed texture of exactly this size, if there is one.
+    pub(crate) fn take(&self, width: u32, height: u32) -> Option<wgpu::Texture> {
+        let mut inner = self.inner.lock().ok()?;
+        let i = inner
+            .idle
+            .iter()
+            .rposition(|(_, t)| t.width() == width && t.height() == height)?;
+        Some(inner.idle.swap_remove(i).1)
+    }
+
+    /// Frees the textures not reused within `max_idle_frames`, and the oldest beyond
+    /// `max_bytes`.
+    pub(crate) fn end_frame(&self, max_idle_frames: u64, max_bytes: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let oldest = inner.frame.saturating_sub(max_idle_frames);
+        inner.idle.retain(|(freed, _)| *freed >= oldest);
+        let bytes = |t: &wgpu::Texture| u64::from(t.width()) * u64::from(t.height()) * 4;
+        let mut total: u64 = inner.idle.iter().map(|(_, t)| bytes(t)).sum();
+        if total > max_bytes {
+            inner.idle.sort_by_key(|(freed, _)| std::cmp::Reverse(*freed));
+            while total > max_bytes {
+                let Some((_, t)) = inner.idle.pop() else {
+                    break;
+                };
+                total -= bytes(&t);
+            }
+        }
+        inner.frame += 1;
+    }
+
+    pub(crate) fn clear(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.idle.clear();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Texture {
     /// AQW build: counted in the perf log until the bitmap is freed.
     live: Option<perf_counters::LiveBitmap>,
+    /// AQW build: where this texture goes when freed, for reuse (cacheAsBitmap textures only).
+    recycle: Option<Arc<TextureRecycler>>,
     pub(crate) texture: wgpu::Texture,
     repeating_linear: OnceCell<BitmapBinds>,
     repeating_nearest: OnceCell<BitmapBinds>,
     clamped_linear: OnceCell<BitmapBinds>,
     clamped_nearest: OnceCell<BitmapBinds>,
     copy_count: Cell<u8>,
+}
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        if let Some(recycler) = self.recycle.take() {
+            recycler.put(self.texture.clone());
+        }
+    }
 }
 
 impl Texture {
@@ -479,7 +555,13 @@ pub mod perf_counters {
     /// them, in thousands of pixels: how tightly they're packed (see `crate::packing`).
     pub const PAGE_KPX: usize = 51;
     pub const SLOT_KPX: usize = 52;
-    const LEN: usize = 53;
+    /// Textures made for bitmaps (`register_bitmap`) and for cacheAsBitmap pictures
+    /// (`create_empty_texture`, made again when the object changes size), and cacheAsBitmap
+    /// textures reused instead (see `TextureRecycler`).
+    pub const BITMAP_NEW: usize = 53;
+    pub const CAB_TEXTURE_NEW: usize = 54;
+    pub const CAB_TEXTURE_REUSED: usize = 55;
+    const LEN: usize = 56;
     pub const NAMES: [&str; LEN] = [
         "passes",
         "layer",
@@ -534,6 +616,9 @@ pub mod perf_counters {
         "cab_pages",
         "page_kpx",
         "slot_kpx",
+        "bitmap_new",
+        "cab_texture_new",
+        "cab_texture_reused",
     ];
 
     static COUNTS: [AtomicU32; LEN] = [const { AtomicU32::new(0) }; LEN];
