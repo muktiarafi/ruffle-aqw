@@ -480,6 +480,24 @@ impl<'gc> LoadManager<'gc> {
         }
         let handles: Vec<_> = context.load_manager.0.iter().map(|(h, _)| h).collect();
         for handle in handles {
+            // Turu: an AVM2 load whose content isn't a movie clip (an image) fires its init and
+            // complete events in `movie_loader_complete`, which then marks it `Succeeded`; the
+            // check below never removed it (its target is the `Loader`'s placeholder clip, which
+            // never initializes), so its `LoaderInfo`, `Loader` and image stayed in memory for
+            // good. AQW loads an ad on every death: ~1 MB each under a bot that dies often.
+            if let Some(MovieLoader {
+                loader_status: LoaderStatus::Succeeded,
+                vm_data: MovieLoaderVMData::Avm2 { loader_info, .. },
+                ..
+            }) = context.load_manager.get_loader(handle)
+                && matches!(
+                    &*loader_info.loader_stream(),
+                    LoaderStream::Swf(_, root) if root.as_movie_clip().is_none()
+                )
+            {
+                context.load_manager.remove_loader(handle);
+                continue;
+            }
             if let Some(MovieLoader { target_clip, .. }) = context.load_manager.get_loader(handle)
                 && let Some(movie) = target_clip.as_movie_clip()
                 && movie.try_fire_loaderinfo_events(context)
