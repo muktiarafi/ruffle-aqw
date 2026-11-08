@@ -561,6 +561,33 @@ impl<'gc> MovieLibraries<'gc> {
         rows
     }
 
+    /// AQW build, for the perf log: the URLs whose live movies hold the most memory, as (URL,
+    /// movies, bytes), most first. Bytes are the decompressed SWF data (each shared buffer
+    /// counted once) plus, for images, their decoded pixels: what one map, monster or piece of
+    /// gear costs while it stays loaded.
+    fn movie_sizes(&self, top: usize) -> Vec<(String, usize, u64)> {
+        let mut by_url: fnv::FnvHashMap<String, (usize, u64)> = Default::default();
+        let mut buffers = fnv::FnvHashSet::default();
+        for movie in self.0.keys() {
+            let entry = by_url.entry(movie.url().to_owned()).or_default();
+            entry.0 += 1;
+            if buffers.insert(movie.data().as_ptr() as usize) {
+                entry.1 += movie.data().len() as u64;
+            }
+            if !movie.is_movie() {
+                let (w, h) = (movie.width().to_pixels(), movie.height().to_pixels());
+                entry.1 += (w.max(0.0) * h.max(0.0) * 4.0) as u64;
+            }
+        }
+        let mut rows: Vec<_> = by_url
+            .into_iter()
+            .map(|(url, (n, bytes))| (url, n, bytes))
+            .collect();
+        rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        rows.truncate(top);
+        rows
+    }
+
     fn get(&self, key: &Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
         self.0.get(key)
     }
@@ -674,6 +701,11 @@ impl<'gc> Library<'gc> {
     /// AQW build, for the perf log: see `MovieLibraries::movie_census`.
     pub fn movie_census(&self, top: usize) -> Vec<(String, usize, usize, u64)> {
         self.movie_libraries.movie_census(top)
+    }
+
+    /// AQW build, for the perf log: see `MovieLibraries::movie_sizes`.
+    pub fn movie_sizes(&self, top: usize) -> Vec<(String, usize, u64)> {
+        self.movie_libraries.movie_sizes(top)
     }
 
     /// Turu: a loaded movie whose URL `matches`, so the frontend can read a SWF the game

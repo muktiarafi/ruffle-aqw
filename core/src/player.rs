@@ -1129,6 +1129,20 @@ impl Player {
             .join(", ")
     }
 
+    /// AQW build, for the perf log: the `top` URLs whose live movies hold the most memory, as
+    /// `url xN 1.7 MB` (see `MovieLibraries::movie_sizes`).
+    pub fn aqw_movie_sizes(&mut self, top: usize) -> String {
+        let rows = self.mutate_with_update_context(|context| context.library.movie_sizes(top));
+        rows.iter()
+            .map(|(url, n, bytes)| {
+                let url = url.split('?').next().unwrap_or(url);
+                let url = url.rsplit("/gamefiles/").next().unwrap_or(url);
+                format!("{url} x{n} {:.1} MB", *bytes as f64 / 1048576.0)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// AQW build, for the perf log: loaded SWF movies and live GC objects.
     pub fn aqw_memory_report(&mut self) -> String {
         let gc_objects = self.gc_arena.borrow().metrics().total_gc_count();
