@@ -104,3 +104,51 @@ pub(crate) fn census<'gc, R: Collect<'gc>>(root: &R) -> HashMap<String, u64> {
     }
     counts
 }
+
+/// AQW build: the strongly reachable clip definitions (`MovieClipShared`) and ABC units
+/// (`TranslationUnitData`) made from one of `movies`, as (movie, holder), at most `max`: what
+/// keeps an old copy of a movie alive when no `LoaderInfo` does.
+pub(crate) fn movie_holders<'gc, R: Collect<'gc>>(
+    root: &R,
+    movies: &[*const crate::tag_utils::SwfMovie],
+    max: usize,
+) -> Vec<(*const crate::tag_utils::SwfMovie, *const ())> {
+    let mut seen: std::collections::HashSet<*const ()> = std::collections::HashSet::new();
+    let mut stack = Vec::new();
+    let mut edges = Vec::new();
+    root.trace(&mut RawEdgeTracer(&mut StrongEdges(&mut edges)));
+    for child in edges.drain(..) {
+        if seen.insert(child) {
+            stack.push(child);
+        }
+    }
+    let mut found = Vec::new();
+    while let Some(node) = stack.pop() {
+        // SAFETY: every pointer here was reached through strong edges from the root, so it is
+        // live, and no collection runs during this walk.
+        let full = unsafe { gc_arena::inspect::type_name(node) };
+        let name = full.split('<').next().unwrap_or(full);
+        let movie = if name.ends_with("::MovieClipShared") {
+            // SAFETY: the value's type is `MovieClipShared`.
+            Some(unsafe { crate::display_object::aqw_shared_movie(node) })
+        } else if name.ends_with("::TranslationUnitData") {
+            // SAFETY: the value's type is `TranslationUnitData`.
+            Some(unsafe { crate::avm2::script::aqw_unit_movie(node) })
+        } else {
+            None
+        };
+        if let Some(movie) = movie
+            && movies.contains(&movie)
+            && found.len() < max
+        {
+            found.push((movie, node));
+        }
+        unsafe { visit_edges(node, &mut StrongEdges(&mut edges)) };
+        for child in edges.drain(..) {
+            if seen.insert(child) {
+                stack.push(child);
+            }
+        }
+    }
+    found
+}

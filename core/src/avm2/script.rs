@@ -82,6 +82,16 @@ struct TranslationUnitData<'gc> {
     movie: Arc<SwfMovie>,
 }
 
+/// AQW build (diagnostic): the movie the `TranslationUnitData` at `ptr` was loaded from, to find
+/// what keeps an old copy of a movie alive (`aqw_retention::movie_holders`).
+///
+/// # Safety
+///
+/// `ptr` must point at a live `TranslationUnitData`.
+pub(crate) unsafe fn aqw_unit_movie(ptr: *const ()) -> *const SwfMovie {
+    unsafe { Arc::as_ptr(&(*(ptr as *const TranslationUnitData<'_>)).movie) }
+}
+
 impl<'gc> TranslationUnit<'gc> {
     /// Construct a new `TranslationUnit` for a given ABC file intended to
     /// execute within a particular domain.

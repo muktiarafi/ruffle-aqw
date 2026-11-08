@@ -1082,23 +1082,121 @@ impl Player {
             target: "ruffle_aqw_perf",
             "loader retention: {live} live LoaderInfos for movies matching {url_part:?}"
         );
-        if targets.is_empty() {
+        if !targets.is_empty() {
+            let started = Instant::now();
+            let paths = self
+                .gc_arena
+                .borrow()
+                .mutate(|_, root| crate::aqw_retention::retention_paths(root, &targets));
+            tracing::warn!(
+                target: "ruffle_aqw_perf",
+                "retention report for {} LoaderInfos ({:.0} ms):",
+                targets.len(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+            for (i, path) in paths.iter().enumerate() {
+                for (depth, line) in path.iter().enumerate() {
+                    tracing::warn!(target: "ruffle_aqw_perf", "  #{i} {depth:>3}: {line}");
+                }
+            }
+        }
+        self.log_movie_holders(url_part, max_targets);
+    }
+
+    /// Turu: copies of a movie whose URL contains `url_part` that no live `LoaderInfo` loaded are
+    /// kept alive by something else: logs how many there are, the clip definitions and ABC units
+    /// made from them, and what keeps up to `max_targets` of those alive. Copies with none of
+    /// either are held outside the GC heap (a Rust-side `Arc<SwfMovie>`).
+    fn log_movie_holders(&mut self, url_part: &str, max_targets: usize) {
+        let (copies, orphaned, classes): (
+            usize,
+            Vec<*const SwfMovie>,
+            Vec<(*const SwfMovie, *const ())>,
+        ) = self.mutate_with_update_context(|context| {
+            let loaded: Vec<*const SwfMovie> = context
+                .avm2
+                .aqw_loader_infos(context.gc())
+                .into_iter()
+                .map(|li| Arc::as_ptr(li.loader_stream().movie()))
+                .collect();
+            let matching: Vec<Arc<SwfMovie>> = context
+                .library
+                .known_movies()
+                .filter(|m| m.url().contains(url_part))
+                .collect();
+            let orphaned: Vec<*const SwfMovie> = matching
+                .iter()
+                .map(Arc::as_ptr)
+                .filter(|m| !loaded.contains(m))
+                .collect();
+            let classes = context.library.aqw_classes_of(&orphaned);
+            (matching.len(), orphaned, classes)
+        });
+        if orphaned.is_empty() {
             return;
         }
         let started = Instant::now();
-        let paths = self
-            .gc_arena
-            .borrow()
-            .mutate(|_, root| crate::aqw_retention::retention_paths(root, &targets));
+        let (holders, paths) = self.gc_arena.borrow().mutate(|_, root| {
+            let mut holders = crate::aqw_retention::movie_holders(root, &orphaned, 4000);
+            // The AS3 classes linked to their symbols: a live one keeps the library in use.
+            holders.extend(classes.iter().copied());
+            let targets: Vec<*const ()> = holders.iter().map(|&(_, node)| node).collect();
+            (
+                holders,
+                crate::aqw_retention::retention_paths(root, &targets),
+            )
+        });
         tracing::warn!(
             target: "ruffle_aqw_perf",
-            "retention report for {} LoaderInfos ({:.0} ms):",
-            targets.len(),
-            started.elapsed().as_secs_f64() * 1000.0
+            "movie holders: {copies} live copies of {url_part:?}, {} without a LoaderInfo; {} clip definitions and ABC units made from those ({:.0} ms){}",
+            orphaned.len(),
+            holders.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+            if holders.is_empty() { ": none in the GC heap, so a Rust-side Arc keeps them" } else { "" }
         );
-        for (i, path) in paths.iter().enumerate() {
-            for (depth, line) in path.iter().enumerate() {
-                tracing::warn!(target: "ruffle_aqw_perf", "  #{i} {depth:>3}: {line}");
+        // One chain per copy: the shortest that isn't the copy's own library holding its symbol
+        // (`GcRoot -> GcRootData -> MovieClipData -> MovieClipShared`, the library's characters
+        // being inline in the root), as that only says the library is still kept.
+        let library_only = |path: &Vec<String>| {
+            path.len() == 4
+                && path[2].contains("MovieClipData")
+                && path[3].contains("MovieClipShared")
+        };
+        for (n, &movie) in orphaned.iter().enumerate().take(max_targets) {
+            let mine: Vec<&Vec<String>> = holders
+                .iter()
+                .zip(&paths)
+                .filter(|((m, _), _)| *m == movie)
+                .map(|(_, path)| path)
+                .collect();
+            let outside = mine
+                .iter()
+                .filter(|p| !library_only(p))
+                .min_by_key(|p| p.len());
+            tracing::warn!(
+                target: "ruffle_aqw_perf",
+                "  copy #{n}: {} holders, {} only its library's own symbols{}",
+                mine.len(),
+                mine.iter().filter(|p| library_only(p)).count(),
+                if outside.is_none() { "; nothing else holds it" } else { "; held from outside by:" }
+            );
+            if let Some(path) = outside {
+                for (depth, line) in path.iter().enumerate() {
+                    tracing::warn!(target: "ruffle_aqw_perf", "    #{n} {depth:>3}: {line}");
+                }
+            }
+            // What keeps a linked AS3 class alive (the cleanup's usual reason to keep a copy).
+            let class_path = holders
+                .iter()
+                .zip(&paths)
+                .filter(|((m, node), _)| *m == movie && classes.iter().any(|(_, c)| c == node))
+                .map(|(_, path)| path)
+                .min_by_key(|p| p.len());
+            if let Some(path) = class_path {
+                tracing::warn!(target: "ruffle_aqw_perf", "  copy #{n}: its linked AS3 class is held by:");
+                for (depth, line) in path.iter().enumerate() {
+                    tracing::warn!(target: "ruffle_aqw_perf", "    class #{n} {depth:>3}: {line}");
+                }
             }
         }
     }

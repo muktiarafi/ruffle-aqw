@@ -418,6 +418,17 @@ struct LibraryGcState {
     backoff: std::cell::Cell<u16>,
 }
 
+/// Turu (diagnostic): `RUFFLE_AQW_LIBRARY_WHY`, see `Library::finalize_movie_libraries`.
+fn aqw_library_why() -> Option<&'static str> {
+    static WHY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    WHY.get_or_init(|| {
+        std::env::var("RUFFLE_AQW_LIBRARY_WHY")
+            .ok()
+            .filter(|v| !v.is_empty())
+    })
+    .as_deref()
+}
+
 /// AQW build: something that keeps a movie's library in use while it is alive.
 pub struct MovieAnchor<'gc> {
     anchor: gc_arena::GcWeak<'gc, ()>,
@@ -703,6 +714,17 @@ impl<'gc> Library<'gc> {
         self.movie_libraries.movie_census(top)
     }
 
+    /// Turu (diagnostic): the AS3 classes (`Class` pointers) linked to a symbol of one of
+    /// `movies`, to find what keeps old copies of a movie loaded (`Player::log_movie_holders`).
+    pub fn aqw_classes_of(&self, movies: &[*const SwfMovie]) -> Vec<(*const SwfMovie, *const ())> {
+        self.avm2_class_registry
+            .class_map
+            .iter()
+            .filter(|(_, MovieSymbol(movie, _))| movies.contains(&Arc::as_ptr(movie)))
+            .map(|(class, MovieSymbol(movie, _))| (Arc::as_ptr(&movie), class.as_ptr()))
+            .collect()
+    }
+
     /// AQW build, for the perf log: see `MovieLibraries::movie_sizes`.
     pub fn movie_sizes(&self, top: usize) -> Vec<(String, usize, u64)> {
         self.movie_libraries.movie_sizes(top)
@@ -742,9 +764,16 @@ impl<'gc> Library<'gc> {
         fc: &gc_arena::Finalization<'gc>,
         anchored: &mut FnvHashSet<usize>,
     ) -> bool {
-        for (class, MovieSymbol(movie, _)) in self.avm2_class_registry.class_map.iter() {
+        // Turu (diagnostic): `RUFFLE_AQW_LIBRARY_WHY=<part of a URL>` logs why a tested library of
+        // a matching movie is kept, to find what keeps old copies of a movie loaded.
+        let why_url = aqw_library_why();
+        let mut class_anchored = FnvHashSet::default();
+        for (class, MovieSymbol(movie, id)) in self.avm2_class_registry.class_map.iter() {
             if !class.is_dead(fc) {
                 anchored.insert(Arc::as_ptr(&movie) as usize);
+                if why_url.is_some_and(|part| movie.url().contains(part)) {
+                    class_anchored.insert((Arc::as_ptr(&movie) as usize, id));
+                }
             }
         }
         let mut revived = false;
@@ -752,11 +781,31 @@ impl<'gc> Library<'gc> {
             if !library.aqw_gc.testing.get() {
                 continue;
             }
-            let in_use = anchored.contains(&(Arc::as_ptr(&movie) as usize))
-                || library
-                    .characters
-                    .values()
-                    .any(|c| character_in_use(fc, c));
+            let addr = Arc::as_ptr(&movie) as usize;
+            let in_use = anchored.contains(&addr)
+                || library.characters.values().any(|c| character_in_use(fc, c));
+            if in_use && why_url.is_some_and(|part| movie.url().contains(part)) {
+                let why = if let Some((_, id)) = class_anchored.iter().find(|(a, _)| *a == addr) {
+                    format!("an AS3 class linked to its symbol {id} is alive")
+                } else if anchored.contains(&addr) {
+                    "its code (or a LoaderInfo) is alive".to_string()
+                } else {
+                    let ids: Vec<_> = library
+                        .characters
+                        .iter()
+                        .filter(|(_, c)| character_in_use(fc, c))
+                        .map(|(id, _)| *id)
+                        .take(5)
+                        .collect();
+                    format!("instances of its symbols {ids:?} are alive")
+                };
+                tracing::warn!(
+                    target: "ruffle_aqw_perf",
+                    "library of {} (copy {addr:#x}, backoff {}) kept: {why}",
+                    movie.url(),
+                    library.aqw_gc.backoff.get()
+                );
+            }
             if in_use {
                 library.aqw_gc.testing.set(false);
                 let backoff = (library.aqw_gc.backoff.get() * 2 + 1).min(63);

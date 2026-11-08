@@ -4934,6 +4934,16 @@ struct EagerTags {
     symbolclass_names: Vec<(WString, u16)>,
 }
 
+/// AQW build (diagnostic): the movie of the clip definition (`MovieClipShared`) at `ptr`, to find
+/// what keeps an old copy of a movie alive (`aqw_retention::movie_holders`).
+///
+/// # Safety
+///
+/// `ptr` must point at a live `MovieClipShared`.
+pub(crate) unsafe fn aqw_shared_movie(ptr: *const ()) -> *const SwfMovie {
+    unsafe { Arc::as_ptr(&(*(ptr as *const MovieClipShared<'_>)).movie) }
+}
+
 impl<'gc> MovieClipShared<'gc> {
     fn empty(movie: Arc<SwfMovie>) -> Self {
         let mut s = Self::with_data(0, movie.clone(), SwfSlice::empty(movie), 1, None, None);
