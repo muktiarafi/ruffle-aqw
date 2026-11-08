@@ -403,6 +403,14 @@ impl<'gc> Avm2<'gc> {
             .push(object::LoaderInfoObjectWeak(Gc::downgrade(loader_info.0)));
     }
 
+    /// Turu: the `LoaderInfo`s still alive, for retention reports.
+    pub fn aqw_loader_infos(&self, mc: &Mutation<'gc>) -> Vec<object::LoaderInfoObject<'gc>> {
+        self.loader_infos
+            .iter()
+            .filter_map(|weak| weak.0.upgrade(mc).map(object::LoaderInfoObject))
+            .collect()
+    }
+
     /// AQW build: inserts the movies (as `Arc::as_ptr` addresses) whose `LoaderInfo` or code is
     /// still reachable. Only valid during finalization.
     pub fn movie_anchors(

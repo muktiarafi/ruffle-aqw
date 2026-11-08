@@ -1056,9 +1056,77 @@ impl Player {
         }
     }
 
+    /// Turu: logs what keeps up to `max_targets` live `LoaderInfo`s whose movie's URL contains
+    /// `url_part` alive (oldest, middle, newest), to find why loaded images aren't freed. Walks
+    /// the whole heap once, so it takes a moment.
+    pub fn log_loader_retention(&mut self, url_part: &str, max_targets: usize) {
+        let (live, targets): (usize, Vec<*const ()>) = self.mutate_with_update_context(|context| {
+            let found: Vec<*const ()> = context
+                .avm2
+                .aqw_loader_infos(context.gc())
+                .into_iter()
+                .filter(|li| li.loader_stream().movie().url().contains(url_part))
+                .map(|li| gc_arena::Gc::as_ptr(li.0) as *const ())
+                .collect();
+            let n = found.len();
+            let mut picked: Vec<_> = [0, n / 2, n.saturating_sub(1)]
+                .into_iter()
+                .filter(|&i| i < n)
+                .map(|i| found[i])
+                .collect();
+            picked.dedup();
+            picked.truncate(max_targets);
+            (n, picked)
+        });
+        tracing::warn!(
+            target: "ruffle_aqw_perf",
+            "loader retention: {live} live LoaderInfos for movies matching {url_part:?}"
+        );
+        if targets.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        let paths = self
+            .gc_arena
+            .borrow()
+            .mutate(|_, root| crate::aqw_retention::retention_paths(root, &targets));
+        tracing::warn!(
+            target: "ruffle_aqw_perf",
+            "retention report for {} LoaderInfos ({:.0} ms):",
+            targets.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        for (i, path) in paths.iter().enumerate() {
+            for (depth, line) in path.iter().enumerate() {
+                tracing::warn!(target: "ruffle_aqw_perf", "  #{i} {depth:>3}: {line}");
+            }
+        }
+    }
+
     /// Turu: a loaded movie whose URL `matches` (see `Library::loaded_movie`).
     pub fn loaded_movie(&mut self, matches: impl Fn(&str) -> bool) -> Option<Arc<SwfMovie>> {
         self.mutate_with_update_context(|context| context.library.loaded_movie(&matches))
+    }
+
+    /// AQW build, for the perf log: the URLs with the most live movies (`url xN`, with how many
+    /// are images and their decoded size), to find what's loaded again and again and kept.
+    pub fn aqw_movie_census(&mut self, top: usize) -> String {
+        let rows = self.mutate_with_update_context(|context| context.library.movie_census(top));
+        rows.iter()
+            .map(|(url, n, images, pixels)| {
+                let url = url.split('?').next().unwrap_or(url);
+                let url = url.rsplit("/gamefiles/").next().unwrap_or(url);
+                if *images > 0 {
+                    format!(
+                        "{url} x{n} ({images} images, {:.1} MB pixels)",
+                        *pixels as f64 / 1048576.0
+                    )
+                } else {
+                    format!("{url} x{n}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// AQW build, for the perf log: loaded SWF movies and live GC objects.

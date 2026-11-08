@@ -538,6 +538,29 @@ impl<'gc> MovieLibraries<'gc> {
         (movies, urls.len(), total, distinct)
     }
 
+    /// AQW build, for the perf log: the URLs with the most live movies, as (URL, movies,
+    /// images among them, decoded pixels of those images in bytes), most first. A URL loaded
+    /// again and again whose movies stay alive is what grows.
+    fn movie_census(&self, top: usize) -> Vec<(String, usize, usize, u64)> {
+        let mut by_url: fnv::FnvHashMap<String, (usize, usize, u64)> = Default::default();
+        for movie in self.0.keys() {
+            let entry = by_url.entry(movie.url().to_owned()).or_default();
+            entry.0 += 1;
+            if !movie.is_movie() {
+                entry.1 += 1;
+                let (w, h) = (movie.width().to_pixels(), movie.height().to_pixels());
+                entry.2 += (w.max(0.0) * h.max(0.0) * 4.0) as u64;
+            }
+        }
+        let mut rows: Vec<_> = by_url
+            .into_iter()
+            .map(|(url, (n, images, pixels))| (url, n, images, pixels))
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        rows.truncate(top);
+        rows
+    }
+
     fn get(&self, key: &Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
         self.0.get(key)
     }
@@ -648,6 +671,11 @@ impl<'gc> Library<'gc> {
         self.movie_libraries.movie_data_stats()
     }
 
+    /// AQW build, for the perf log: see `MovieLibraries::movie_census`.
+    pub fn movie_census(&self, top: usize) -> Vec<(String, usize, usize, u64)> {
+        self.movie_libraries.movie_census(top)
+    }
+
     /// Turu: a loaded movie whose URL `matches`, so the frontend can read a SWF the game
     /// already downloaded (a map's cells and pads) instead of downloading it again.
     pub fn loaded_movie(&self, matches: impl Fn(&str) -> bool) -> Option<Arc<SwfMovie>> {
@@ -712,7 +740,8 @@ impl<'gc> Library<'gc> {
 
     /// AQW build: the second half of `finalize_movie_libraries`, once nothing was revived:
     /// removes the unused libraries and dead class registry keys, then picks the libraries to
-    /// test next cycle (the root movie and AVM1 movies are never freed).
+    /// test next cycle (the root movie and AVM1 movies are never freed; images a `Loader`
+    /// loaded and empty `Loader` movies are tested like AS3 ones).
     pub fn sweep_movie_libraries(
         &mut self,
         fc: &gc_arena::Finalization<'gc>,
@@ -742,7 +771,12 @@ impl<'gc> Library<'gc> {
         const MAX_CHARACTERS: usize = 4000;
         let (mut libraries, mut characters) = (0, 0);
         for (movie, library) in self.movie_libraries.0.iter() {
-            if Arc::ptr_eq(&movie, root_movie) || !movie.is_action_script_3() {
+            // Turu: a loaded image (or an empty `Loader` movie) isn't a SWF: its header has no
+            // AS3 flag, so it read as AVM1 and was never tested. AQW loads a death ad on every
+            // death; under a bot dying every 15 s they piled up (~150 MB/h). Its library holds
+            // no characters, only its `Loader`'s domain; a live `LoaderInfo` still anchors it.
+            if Arc::ptr_eq(&movie, root_movie) || (!movie.is_action_script_3() && movie.is_movie())
+            {
                 continue;
             }
             let state = &library.aqw_gc;
