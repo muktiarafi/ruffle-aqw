@@ -1130,6 +1130,17 @@ impl Player {
                 .filter(|m| !loaded.contains(m))
                 .collect();
             let classes = context.library.aqw_classes_of(&orphaned);
+            // Turu: which domain exports them, and under what name.
+            let class_ptrs: Vec<*const ()> = classes.iter().map(|(_, c)| *c).collect();
+            let stage = context.avm2.stage_domain();
+            for (_, line) in context
+                .library
+                .aqw_domains_exporting(&class_ptrs, stage)
+                .iter()
+                .take(6)
+            {
+                tracing::warn!(target: "ruffle_aqw_perf", "  class {line}");
+            }
             (matching.len(), orphaned, classes)
         });
         if orphaned.is_empty() {
@@ -1137,14 +1148,17 @@ impl Player {
         }
         let started = Instant::now();
         let (holders, paths) = self.gc_arena.borrow().mutate(|_, root| {
+            // Leave the orphaned copies' own libraries out of the walk (Turu), so the chains show
+            // what holds them from outside: their libraries hold their symbols and their domains,
+            // which hold their classes.
+            let hidden = root.data.borrow().library.aqw_hide_libraries(&orphaned);
             let mut holders = crate::aqw_retention::movie_holders(root, &orphaned, 4000);
             // The AS3 classes linked to their symbols: a live one keeps the library in use.
             holders.extend(classes.iter().copied());
             let targets: Vec<*const ()> = holders.iter().map(|&(_, node)| node).collect();
-            (
-                holders,
-                crate::aqw_retention::retention_paths(root, &targets),
-            )
+            let paths = crate::aqw_retention::retention_paths(root, &targets);
+            root.data.borrow().library.aqw_restore_libraries(&hidden);
+            (holders, paths)
         });
         tracing::warn!(
             target: "ruffle_aqw_perf",

@@ -725,6 +725,71 @@ impl<'gc> Library<'gc> {
             .collect()
     }
 
+    /// Turu (diagnostic): which domain exports each of `classes` (`Class` pointers), and under
+    /// what name: the stage's domain or the domain of a movie's library (by URL), with how many
+    /// classes that domain exports under the same local name.
+    pub fn aqw_domains_exporting(
+        &self,
+        classes: &[*const ()],
+        stage: Avm2Domain<'gc>,
+    ) -> Vec<(*const (), String)> {
+        let mut domains = vec![("stage".to_string(), stage)];
+        for (movie, library) in self.movie_libraries.0.iter() {
+            if let Some(domain) = library.avm2_domain {
+                let url = movie.url().split('?').next().unwrap_or("").to_string();
+                domains.push((url, domain));
+            }
+        }
+        let mut seen = FnvHashSet::default();
+        let mut found = Vec::new();
+        for (owner, domain) in domains {
+            if !seen.insert(domain.as_ptr()) {
+                continue;
+            }
+            let exported = domain.classes();
+            for (name, ns, class) in exported.iter() {
+                if !classes.contains(&class.as_ptr()) {
+                    continue;
+                }
+                let same = exported.iter().filter(|(n, _, _)| *n == name).count();
+                let uri = ns.as_uri_opt().map(|u| u.to_string()).unwrap_or_default();
+                found.push((
+                    class.as_ptr(),
+                    format!(
+                        "exported as {uri:?}::{name} by the domain of {owner} ({} classes, {same} named {name})",
+                        exported.iter().count()
+                    ),
+                ));
+            }
+        }
+        found
+    }
+
+    /// Turu (diagnostic): stops tracing the libraries of `movies` (as if they were being tested),
+    /// so a heap walk finds what holds those movies from outside their own library: a library
+    /// holds its own symbols and its domain, which holds its classes, so a walk that traces it
+    /// only ever finds the library. Returns the previous flags for `aqw_restore_libraries`.
+    pub fn aqw_hide_libraries(&self, movies: &[*const SwfMovie]) -> Vec<(*const SwfMovie, bool)> {
+        self.movie_libraries
+            .0
+            .iter()
+            .filter(|(movie, _)| movies.contains(&Arc::as_ptr(movie)))
+            .map(|(movie, library)| {
+                let was = library.aqw_gc.testing.replace(true);
+                (Arc::as_ptr(&movie), was)
+            })
+            .collect()
+    }
+
+    /// Turu (diagnostic): undoes `aqw_hide_libraries`.
+    pub fn aqw_restore_libraries(&self, saved: &[(*const SwfMovie, bool)]) {
+        for (movie, library) in self.movie_libraries.0.iter() {
+            if let Some((_, was)) = saved.iter().find(|(m, _)| *m == Arc::as_ptr(&movie)) {
+                library.aqw_gc.testing.set(*was);
+            }
+        }
+    }
+
     /// AQW build, for the perf log: see `MovieLibraries::movie_sizes`.
     pub fn movie_sizes(&self, top: usize) -> Vec<(String, usize, u64)> {
         self.movie_libraries.movie_sizes(top)
@@ -874,6 +939,47 @@ impl<'gc> Library<'gc> {
             state.testing.set(true);
             libraries += 1;
             characters += library.characters.len();
+        }
+
+        // Turu: libraries that share an AVM2 domain are tested together. AQW loads all of a map's
+        // monsters into one domain, which each of their libraries holds and which exports all of
+        // their classes, so each library kept the others' classes alive: tested one at a time
+        // (each on its own backoff), none was ever found unused and every map join left a copy
+        // of each monster (x25 per monster after 30 min of alternating two maps). The root
+        // movie's domain is left out (the root library is never tested, so it stays alive), as
+        // are groups too big for one cycle.
+        let domain_of =
+            |library: &MovieLibrary<'gc>| library.avm2_domain.map(|d| d.as_ptr() as *const ());
+        let root_domain = self.movie_libraries.0.get(root_movie).and_then(domain_of);
+        let mut members: FnvHashMap<*const (), usize> = FnvHashMap::default();
+        let mut pulled: FnvHashSet<*const ()> = FnvHashSet::default();
+        for (movie, library) in self.movie_libraries.0.iter() {
+            if let Some(domain) = domain_of(library)
+                && Some(domain) != root_domain
+                && !Arc::ptr_eq(&movie, root_movie)
+            {
+                *members.entry(domain).or_default() += 1;
+                if library.aqw_gc.testing.get() {
+                    pulled.insert(domain);
+                }
+            }
+        }
+        pulled.retain(|domain| {
+            members
+                .get(domain)
+                .is_some_and(|&n| n > 1 && n <= MAX_LIBRARIES)
+        });
+        if !pulled.is_empty() {
+            for (movie, library) in self.movie_libraries.0.iter() {
+                if Arc::ptr_eq(&movie, root_movie)
+                    || (!movie.is_action_script_3() && movie.is_movie())
+                {
+                    continue;
+                }
+                if domain_of(library).is_some_and(|d| pulled.contains(&d)) {
+                    library.aqw_gc.testing.set(true);
+                }
+            }
         }
     }
 
