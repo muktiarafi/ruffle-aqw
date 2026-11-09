@@ -1317,6 +1317,68 @@ impl Player {
         })
     }
 
+    /// Turu (diagnostic): the cacheAsBitmap textures that objects on the stage and orphans (with
+    /// their children) hold: count and MB for each, then the classes holding the most bytes.
+    /// What the renderer counts beyond these is held by objects reachable from neither (off the
+    /// display list, or garbage the GC hasn't freed yet).
+    pub fn aqw_cache_census(&mut self) -> String {
+        use crate::avm2::object::TObject;
+        #[derive(Default)]
+        struct Tally {
+            count: usize,
+            bytes: u64,
+        }
+        fn walk<'gc>(
+            object: DisplayObject<'gc>,
+            tally: &mut Tally,
+            classes: &mut HashMap<String, (usize, u64)>,
+        ) {
+            if let Some((width, height)) = object.base().aqw_cache_size() {
+                let bytes = width as u64 * height as u64 * 4;
+                tally.count += 1;
+                tally.bytes += bytes;
+                let class = object.object2().map_or_else(
+                    || "<no AS3 object>".to_string(),
+                    |o| o.instance_class().name().local_name().to_string(),
+                );
+                let entry = classes.entry(class).or_default();
+                entry.0 += 1;
+                entry.1 += bytes;
+            }
+            if let Some(container) = object.as_container() {
+                for child in container.iter_render_list() {
+                    walk(child, tally, classes);
+                }
+            }
+        }
+        self.mutate_with_update_context(|context| {
+            let (mut on_stage, mut orphans) = (Tally::default(), Tally::default());
+            let mut classes = HashMap::new();
+            walk(context.stage.into(), &mut on_stage, &mut classes);
+            OrphanManager::each_orphan_obj(context, |orphan, _| {
+                walk(orphan, &mut orphans, &mut classes);
+            });
+            let mut classes: Vec<_> = classes.into_iter().collect();
+            classes.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+            const MB: f64 = 1024.0 * 1024.0;
+            let top = classes
+                .iter()
+                .take(6)
+                .map(|(class, (count, bytes))| {
+                    format!("{class} x{count} ({:.0} MB)", *bytes as f64 / MB)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "on stage {} ({:.0} MB), orphans {} ({:.0} MB); by class: {top}",
+                on_stage.count,
+                on_stage.bytes as f64 / MB,
+                orphans.count,
+                orphans.bytes as f64 / MB,
+            )
+        })
+    }
+
     pub fn background_color(&mut self) -> Option<Color> {
         self.mutate_with_update_context(|context| context.stage.background_color())
     }

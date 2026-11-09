@@ -140,6 +140,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
     pub fn aqw_memory_report(&self) -> String {
         const MB: f64 = 1024.0 * 1024.0;
         let (meshes, mesh_bytes, bitmaps, bitmap_bytes) = crate::perf_counters::live();
+        let (cabs, cab_live_bytes) = crate::perf_counters::live_cab();
         let gpu = self
             .descriptors
             .device
@@ -223,9 +224,10 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             hal.memory_allocations.read(),
         );
         format!(
-            "{meshes} shapes ({:.0} MB), {bitmaps} bitmaps ({:.0} MB), shape buffers: {mesh_chunks} geometry chunks ({:.0}/{:.0} MB used), {uniform_chunks} uniform chunks ({:.1}/{:.0} MB), {gradient_ramps} gradient ramps, layer pool: {pool_textures} textures in {pool_sizes} sizes ({:.0} MB), cache pool: {cab_textures} textures in {cab_sizes} sizes ({:.0} MB); gpu allocator: {gpu}",
+            "{meshes} shapes ({:.0} MB), {bitmaps} bitmaps ({:.0} MB; cacheAsBitmap {cabs}, {:.0} MB), shape buffers: {mesh_chunks} geometry chunks ({:.0}/{:.0} MB used), {uniform_chunks} uniform chunks ({:.1}/{:.0} MB), {gradient_ramps} gradient ramps, layer pool: {pool_textures} textures in {pool_sizes} sizes ({:.0} MB), cache pool: {cab_textures} textures in {cab_sizes} sizes ({:.0} MB); gpu allocator: {gpu}",
             mesh_bytes as f64 / MB,
             bitmap_bytes as f64 / MB,
+            cab_live_bytes as f64 / MB,
             mesh_used as f64 / MB,
             mesh_reserved as f64 / MB,
             uniform_used as f64 / MB,
@@ -1980,7 +1982,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         };
         Ok(BitmapHandle(Arc::new(Texture {
             recycle: Some(self.cab_recycler.clone()),
-            live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
+            live: Some(crate::perf_counters::LiveBitmap::new_cab(&texture)),
             texture,
             repeating_linear: Default::default(),
             repeating_nearest: Default::default(),

@@ -642,6 +642,9 @@ pub mod perf_counters {
     static LIVE_MESH_BYTES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
     static LIVE_BITMAPS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
     static LIVE_BITMAP_BYTES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    // Turu: the cacheAsBitmap share of the live bitmaps (`create_empty_texture`).
+    static LIVE_CABS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    static LIVE_CAB_BYTES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
     /// Counts a live shape mesh (and its vertex/index buffer bytes) until dropped.
     #[derive(Debug)]
@@ -665,14 +668,23 @@ pub mod perf_counters {
 
     /// Counts a live bitmap texture (and its approximate bytes) until dropped.
     #[derive(Debug)]
-    pub struct LiveBitmap(i64);
+    pub struct LiveBitmap(i64, bool);
 
     impl LiveBitmap {
         pub fn new(texture: &wgpu::Texture) -> Self {
             let bytes = texture.width() as i64 * texture.height() as i64 * 4;
             LIVE_BITMAPS.fetch_add(1, Ordering::Relaxed);
             LIVE_BITMAP_BYTES.fetch_add(bytes, Ordering::Relaxed);
-            Self(bytes)
+            Self(bytes, false)
+        }
+
+        /// Turu: a cacheAsBitmap texture, also counted in `live_cab`.
+        pub fn new_cab(texture: &wgpu::Texture) -> Self {
+            let mut live = Self::new(texture);
+            LIVE_CABS.fetch_add(1, Ordering::Relaxed);
+            LIVE_CAB_BYTES.fetch_add(live.0, Ordering::Relaxed);
+            live.1 = true;
+            live
         }
     }
 
@@ -680,7 +692,19 @@ pub mod perf_counters {
         fn drop(&mut self) {
             LIVE_BITMAPS.fetch_sub(1, Ordering::Relaxed);
             LIVE_BITMAP_BYTES.fetch_sub(self.0, Ordering::Relaxed);
+            if self.1 {
+                LIVE_CABS.fetch_sub(1, Ordering::Relaxed);
+                LIVE_CAB_BYTES.fetch_sub(self.0, Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Turu: (live cacheAsBitmap textures, their bytes).
+    pub fn live_cab() -> (i64, i64) {
+        (
+            LIVE_CABS.load(Ordering::Relaxed),
+            LIVE_CAB_BYTES.load(Ordering::Relaxed),
+        )
     }
 
     /// (live meshes, mesh bytes, live bitmaps, bitmap bytes)

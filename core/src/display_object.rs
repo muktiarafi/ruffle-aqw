@@ -873,6 +873,13 @@ impl<'gc> DisplayObjectBase<'gc> {
         self.recheck_cache_as_bitmap();
     }
 
+    /// Turu (diagnostic): the size of this object's cacheAsBitmap texture, if it has one.
+    pub fn aqw_cache_size(&self) -> Option<(u32, u32)> {
+        let cell = self.cell.borrow();
+        let bitmap = cell.cache.as_ref()?.bitmap.as_ref()?;
+        Some((bitmap.width, bitmap.height))
+    }
+
     fn bitmap_cache_mut(&self) -> RefMut<'_, Option<BitmapCache>> {
         RefMut::map(self.cell.borrow_mut(), |c| &mut c.cache)
     }
