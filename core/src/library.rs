@@ -947,6 +947,48 @@ impl<'gc> Library<'gc> {
             libraries += 1;
             characters += library.characters.len();
         }
+
+        // Turu: libraries that share an AVM2 domain are tested together. AQW loads all of a map's
+        // monsters into one domain, which each of their libraries holds and which exports all of
+        // their classes, so each library kept the others' classes alive: tested one at a time
+        // (each on its own backoff), none was ever found unused and every map join left a copy
+        // of each monster (x25 per monster after 30 min of alternating two maps). The root
+        // movie's domain is left out (the root library is never tested, so it stays alive), as
+        // are groups too big for one cycle.
+        let domain_of =
+            |library: &MovieLibrary<'gc>| library.avm2_domain.map(|d| d.as_ptr() as *const ());
+        let root_domain = self.movie_libraries.get(root_movie).and_then(domain_of);
+        let mut members: FnvHashMap<*const (), usize> = FnvHashMap::default();
+        let mut pulled: FnvHashSet<*const ()> = FnvHashSet::default();
+        for library in self.movie_libraries.0.values() {
+            if let Some(domain) = domain_of(library)
+                && Some(domain) != root_domain
+                && !SwfMovie::ptr_eq(&library.swf, &root_movie)
+            {
+                *members.entry(domain).or_default() += 1;
+                if library.aqw_gc.testing.get() {
+                    pulled.insert(domain);
+                }
+            }
+        }
+        pulled.retain(|domain| {
+            members
+                .get(domain)
+                .is_some_and(|&n| n > 1 && n <= max_libraries)
+        });
+        if !pulled.is_empty() {
+            for library in self.movie_libraries.0.values() {
+                let movie = library.swf;
+                if SwfMovie::ptr_eq(&movie, &root_movie)
+                    || (!movie.is_action_script_3() && movie.is_movie())
+                {
+                    continue;
+                }
+                if domain_of(library).is_some_and(|d| pulled.contains(&d)) {
+                    library.aqw_gc.testing.set(true);
+                }
+            }
+        }
     }
 
     pub fn known_movies(&self) -> impl Iterator<Item = SwfMovie<'gc>> {
