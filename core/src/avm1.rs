@@ -42,6 +42,7 @@ pub use property_map::PropertyMap;
 use ruffle_common::avm_string::AvmString;
 use ruffle_wstr::WStr;
 pub use runtime::Avm1;
+pub(crate) use runtime::note_pending_removal;
 pub use value::Value;
 
 #[macro_export]

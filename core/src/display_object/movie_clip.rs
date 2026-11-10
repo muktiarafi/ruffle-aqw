@@ -903,6 +903,8 @@ impl<'gc> MovieClip<'gc> {
     }
 
     pub fn play(self) {
+        // AQW build: a playing clip advances when a frame is entered (see `settle`, "dormant").
+        self.unsettle();
         self.0.play()
     }
 
@@ -2248,6 +2250,18 @@ impl<'gc> MovieClip<'gc> {
             .all(crate::display_object::settle::child_is_settled)
     }
 
+    /// AQW build: whether a clip that just settled also has nothing to do when the next
+    /// frames are entered, and neither have its children (see `display_object::settle`):
+    /// every condition `enter_frame` acts on must be false here.
+    fn can_sleep(self) -> bool {
+        !self.playing()
+            && !self.base().should_skip_next_enter_frame()
+            && self.0.queued_tags.borrow().is_empty()
+            && self
+                .iter_render_list()
+                .all(crate::display_object::settle::child_is_dormant)
+    }
+
     /// AQW build: whether `construct_frame` is a no-op for this clip and all its children
     /// until something changes (see `display_object::settle`). Evaluated at the end of
     /// `construct_frame` in the construct phase, after it walked the children: every
@@ -2667,6 +2681,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
     fn enter_frame(self, context: &mut UpdateContext<'gc>) {
         let skip_frame = self.base().should_skip_next_enter_frame();
+        // AQW build: nothing below advances or is placed (see `display_object::settle`).
+        if !skip_frame && self.is_dormant() {
+            return;
+        }
         //Child removals from looping gotos appear to resolve in reverse order.
         for child in self.iter_render_list().rev() {
             if skip_frame {
@@ -2810,6 +2828,9 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
 
         if self.can_settle() {
             self.set_settled();
+            if self.can_sleep() {
+                self.set_dormant();
+            }
         }
     }
 

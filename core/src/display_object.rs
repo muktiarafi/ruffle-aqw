@@ -340,6 +340,10 @@ pub struct DisplayObjectBase<'gc> {
     #[collect(require_static)]
     constructed: settle::SettledMark,
 
+    /// AQW build: see `settle` ("dormant").
+    #[collect(require_static)]
+    dormant: settle::DormantMark,
+
     /// AQW build: the previous frame's transform, for frame interpolation (see `interp`).
     #[collect(require_static)]
     interp: interp::Tracker,
@@ -390,6 +394,7 @@ impl Default for DisplayObjectBase<'_> {
             scaling_grid: Default::default(),
             settled: Default::default(),
             constructed: Default::default(),
+            dormant: Default::default(),
             interp: Default::default(),
         }
     }
@@ -1675,7 +1680,20 @@ pub trait TDisplayObject<'gc>:
     /// object and everything below it, for the rest of the current frame (see `settle`).
     #[no_dynamic]
     fn is_settled(self) -> bool {
-        self.base().settled.is_set()
+        self.base().settled.is_set() || self.base().dormant.is_set()
+    }
+
+    /// AQW build: whether entering a frame, frame construction and frame scripts are known to
+    /// be no-ops for this object and everything below it, in this frame and the next ones,
+    /// until something changes (see `settle`).
+    #[no_dynamic]
+    fn is_dormant(self) -> bool {
+        self.base().dormant.is_set()
+    }
+
+    #[no_dynamic]
+    fn set_dormant(self) {
+        self.base().dormant.set();
     }
 
     #[no_dynamic]
@@ -1687,7 +1705,8 @@ pub trait TDisplayObject<'gc>:
     /// everything below it, for the rest of the current frame (see `settle`).
     #[no_dynamic]
     fn is_constructed(self) -> bool {
-        self.base().settled.is_set() || self.base().constructed.is_set()
+        let base = self.base();
+        base.settled.is_set() || base.constructed.is_set() || base.dormant.is_set()
     }
 
     #[no_dynamic]
@@ -1704,14 +1723,15 @@ pub trait TDisplayObject<'gc>:
         let mut node = Some(self.into());
         while let Some(object) = node {
             let object: DisplayObject<'gc> = object;
-            // A settled (or constructed) object only has settled (or constructed) descendants,
-            // so one with neither mark means all its ancestors have neither already.
+            // A marked object (settled, constructed or dormant) only has marked descendants,
+            // so one with no mark means all its ancestors have none already.
             let base = object.base();
-            if !base.settled.is_set() && !base.constructed.is_set() {
+            if !base.settled.is_set() && !base.constructed.is_set() && !base.dormant.is_set() {
                 break;
             }
             base.settled.clear();
             base.constructed.clear();
+            base.dormant.clear();
             node = object.parent();
         }
     }
@@ -3583,6 +3603,15 @@ pub mod pick_matrix_cache {
 /// After the first walk in a frame almost everything is "settled": constructed, with no queued
 /// goto and no frame script left to run, so walking it again does nothing.
 ///
+/// Most of a crowded room stands still: clips that are stopped, with nothing queued. Each
+/// frame still walked all of them three times (entering the frame, construction, frame
+/// scripts), which was nearly all of a frame's time in Battleon. So a clip that settles
+/// while it's stopped, has no queued tags and only has such children goes "dormant"
+/// (`MovieClip::can_sleep`): a mark that outlives the frame, and makes `enter_frame`,
+/// `construct_frame` and `run_frame_scripts` skip it until `unsettle` wakes it (which every
+/// change that settling depends on already calls, and `play` too) or, as a safety net,
+/// `DORMANT_FRAMES` frames have passed.
+///
 /// A nested frame's frame scripts make gotos of their own, each a nested frame again that
 /// constructs the whole stage before any of those scripts has finished, so clips that still
 /// have a frame script to run (and so aren't settled) were walked for construction about ten
@@ -3599,14 +3628,94 @@ pub mod pick_matrix_cache {
 /// script being added, queued or run) unsettles it and its ancestors (`unsettle`).
 pub mod settle {
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    thread_local! {
-        static EPOCH: Cell<u64> = const { Cell::new(1) };
-    }
+    // Shared by every player and thread (a thread-local is a slow read on some systems, and
+    // every walked object reads it): a mark is good only while the epoch it was set in is
+    // the current one, so another player's new frame only makes marks expire sooner.
+    static EPOCH: AtomicU64 = AtomicU64::new(1);
+    static DORMANT_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+    /// How many frames a dormant mark lasts at most: should a change ever fail to wake an
+    /// object (`unsettle`), it's walked again within this many frames.
+    const DORMANT_FRAMES: u64 = 32;
 
     /// Unsettles every display object (called when a frame starts).
     pub fn new_frame() {
-        EPOCH.with(|e| e.set(e.get() + 1));
+        let epoch = EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
+        if epoch % DORMANT_FRAMES == 0 {
+            DORMANT_EPOCH.fetch_add(1, Ordering::Relaxed);
+        }
+        // `RUFFLE_DORMANT_AB=<frames>`: dormant marks on and off in turns of that many
+        // frames, to compare frame times within one session (the perf log's `gotos:` line
+        // says which it is).
+        static TURN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let turn = *TURN.get_or_init(|| {
+            std::env::var("RUFFLE_DORMANT_AB").ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+        });
+        if turn > 0 {
+            DORMANT_PAUSED.store((epoch / turn) % 2 == 1, Ordering::Relaxed);
+        }
+    }
+
+    static DORMANT_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Whether dormant marks count right now.
+    pub fn dormant_active() -> bool {
+        dormant_enabled() && !DORMANT_PAUSED.load(Ordering::Relaxed)
+    }
+
+    /// `RUFFLE_NO_DORMANT` turns the dormant mark off, for A/B comparisons.
+    pub fn dormant_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("RUFFLE_NO_DORMANT").is_none() && enabled() && !old_goto())
+    }
+
+    /// The dormant epoch an object went dormant in (0 = not dormant). Unlike a settled mark
+    /// it outlives the frame. Clones start awake.
+    #[derive(Default)]
+    pub struct DormantMark(Cell<u64>);
+
+    impl Clone for DormantMark {
+        fn clone(&self) -> Self {
+            Self::default()
+        }
+    }
+
+    impl DormantMark {
+        pub fn is_set(&self) -> bool {
+            self.0.get() != 0 && self.0.get() == DORMANT_EPOCH.load(Ordering::Relaxed) && dormant_active()
+        }
+
+        pub fn set(&self) {
+            if dormant_active() {
+                self.0.set(DORMANT_EPOCH.load(Ordering::Relaxed));
+            }
+        }
+
+        pub fn clear(&self) {
+            self.0.set(0);
+        }
+    }
+
+    /// Whether `child` lets its parent go dormant. Asked only of the children of an object
+    /// that just settled, so the leaves are known to be constructed.
+    pub fn child_is_dormant(child: super::DisplayObject<'_>) -> bool {
+        use super::{DisplayObject, TDisplayObject};
+        match child {
+            DisplayObject::MovieClip(_) | DisplayObject::LoaderDisplay(_) => child.is_dormant(),
+            // Leaves that do nothing when a frame is entered.
+            DisplayObject::Graphic(_)
+            | DisplayObject::MorphShape(_)
+            | DisplayObject::Text(_)
+            | DisplayObject::EditText(_)
+            | DisplayObject::Video(_)
+            | DisplayObject::Bitmap(_) => true,
+            DisplayObject::Avm1Button(_)
+            | DisplayObject::Avm2Button(_)
+            | DisplayObject::TextLine(_)
+            | DisplayObject::Stage(_) => false,
+        }
     }
 
     /// `RUFFLE_NO_SETTLE` turns this off, for A/B comparisons.
@@ -3628,12 +3737,12 @@ pub mod settle {
 
     impl SettledMark {
         pub fn is_set(&self) -> bool {
-            self.0.get() != 0 && self.0.get() == EPOCH.with(Cell::get)
+            self.0.get() != 0 && self.0.get() == EPOCH.load(Ordering::Relaxed)
         }
 
         pub fn set(&self) {
             if enabled() {
-                self.0.set(EPOCH.with(Cell::get));
+                self.0.set(EPOCH.load(Ordering::Relaxed));
             }
         }
 
@@ -3755,8 +3864,9 @@ pub mod settle {
         pub fn take() -> String {
             let take = |counter: &'static LocalKey<Cell<u64>>| counter.with(|c| c.replace(0));
             format!(
-                "{} gotos ({} to the frame they were on); their nested frames walked {} clips for \
+                "dormant marks {}; {} gotos ({} to the frame they were on); their nested frames walked {} clips for \
                  construction and {} for frame scripts; a button kept {} clips from settling",
+                if super::dormant_active() { "on" } else { "off" },
                 take(&GOTOS),
                 take(&NO_OP_GOTOS),
                 take(&CONSTRUCT_WALKED),

@@ -1149,6 +1149,8 @@ impl<'gc> ChildContainer<'gc> {
         // Note that the depth returned by AS will be offset by the `AVM_DEPTH_BIAS`, so this is really `-(cur_depth+1+AVM_DEPTH_BIAS)`
         child.set_depth(-cur_depth - 1);
         child.set_avm1_pending_removal(true);
+        // AQW build: tells `Avm1::remove_pending` there's something to look for.
+        crate::avm1::note_pending_removal();
 
         if let Some(mc) = child.as_movie_clip() {
             // Clip events should still fire

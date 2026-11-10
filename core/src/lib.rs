@@ -17,6 +17,8 @@ pub use display_object::interp as frame_interpolation;
 /// AQW build, for the perf log: the gotos since the last call and what their nested frames
 /// walked (see `display_object::settle`).
 pub use display_object::settle::stats::take as take_goto_stats;
+/// AQW build, for the perf log: whether dormant marks count right now (`RUFFLE_DORMANT_AB`).
+pub use display_object::settle::dormant_active;
 
 /// Turu: the thread-local state that belongs to one player: its queued and running shape
 /// tessellations (`deferred_shapes`), the change count its recorded pictures are checked

@@ -99,6 +99,10 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
 
     fn enter_frame(self, context: &mut UpdateContext<'gc>) {
         let skip_frame = self.base().should_skip_next_enter_frame();
+        // AQW build: nothing below advances or is placed (see `display_object::settle`).
+        if !skip_frame && self.is_dormant() {
+            return;
+        }
         for child in self.iter_render_list() {
             // See MovieClip::enter_frame for an explanation of this.
             if skip_frame {
@@ -143,6 +147,13 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
                 .all(crate::display_object::settle::child_is_settled)
         {
             self.set_settled();
+            if !self.base().should_skip_next_enter_frame()
+                && self
+                    .iter_render_list()
+                    .all(crate::display_object::settle::child_is_dormant)
+            {
+                self.set_dormant();
+            }
         }
     }
 

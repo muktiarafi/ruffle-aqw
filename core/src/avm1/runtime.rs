@@ -52,9 +52,21 @@ impl<'gc> GlobalEnv<'gc> {
     }
 }
 
+/// AQW build: how many AVM1 removals were queued, by every player (see `Avm1::remove_pending`).
+static PENDING_REMOVALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An object was queued for removal on the next frame.
+pub fn note_pending_removal() {
+    PENDING_REMOVALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Avm1<'gc> {
+    /// AQW build: `PENDING_REMOVALS` when `remove_pending` last found nothing.
+    #[collect(require_static)]
+    pending_removals_seen: u64,
+
     /// The Flash Player version we're emulating.
     player_version: u8,
 
@@ -128,6 +140,8 @@ impl<'gc> Avm1<'gc> {
             max_recursion_depth: 255,
             has_mouse_listener: false,
             clip_exec_list: None,
+            // Not the current count: the first frame searches.
+            pending_removals_seen: u64::MAX,
 
             #[cfg(feature = "avm_debug")]
             debug_output: false,
@@ -483,6 +497,13 @@ impl<'gc> Avm1<'gc> {
     /// Remove all display objects pending removal
     /// See [`find_display_objects_pending_removal`] for details
     fn remove_pending(context: &mut UpdateContext<'gc>) {
+        // AQW build: the search walks the whole display list on every frame, and an AS3 game
+        // never queues such a removal. So it only runs after one was queued (by any player:
+        // the count is shared), and again while it keeps finding objects.
+        let queued = PENDING_REMOVALS.load(std::sync::atomic::Ordering::Relaxed);
+        if queued == context.avm1.pending_removals_seen {
+            return;
+        }
         // Storage for objects to remove
         // Have to do this in two passes to avoid borrow-mut while already borrowed
         let mut out = Vec::new();
@@ -490,6 +511,10 @@ impl<'gc> Avm1<'gc> {
         // Find objects to remove
         for level in context.stage.iter_render_list() {
             Self::find_display_objects_pending_removal(level, &mut out);
+        }
+
+        if out.is_empty() {
+            context.avm1.pending_removals_seen = queued;
         }
 
         for &child in &out {
