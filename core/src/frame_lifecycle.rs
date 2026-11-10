@@ -138,6 +138,8 @@ pub fn run_inner_goto_frame<'gc>(
 
     let stage = context.stage;
     let old_phase = *context.frame_phase;
+    // AQW build: counted for the perf log (see `display_object::settle::stats`).
+    crate::display_object::settle::stats::nested(true);
 
     // When performing goto, frame scripts behave the same as when entering a new frame
     // so no separate cleanup is performed on ones registered during frame script phase
@@ -173,6 +175,7 @@ pub fn run_inner_goto_frame<'gc>(
     context.orphan_manager.cleanup_dead_orphans(context.gc());
 
     *context.frame_phase = old_phase;
+    crate::display_object::settle::stats::nested(false);
 }
 
 /// Broadcast a `enterFrame` event to all `DisplayObject`s.

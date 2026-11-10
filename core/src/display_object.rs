@@ -336,6 +336,10 @@ pub struct DisplayObjectBase<'gc> {
     #[collect(require_static)]
     settled: settle::SettledMark,
 
+    /// AQW build: see `settle` ("constructed").
+    #[collect(require_static)]
+    constructed: settle::SettledMark,
+
     /// AQW build: the previous frame's transform, for frame interpolation (see `interp`).
     #[collect(require_static)]
     interp: interp::Tracker,
@@ -385,6 +389,7 @@ impl Default for DisplayObjectBase<'_> {
             next_scroll_rect: Default::default(),
             scaling_grid: Default::default(),
             settled: Default::default(),
+            constructed: Default::default(),
             interp: Default::default(),
         }
     }
@@ -1678,6 +1683,20 @@ pub trait TDisplayObject<'gc>:
         self.base().settled.set();
     }
 
+    /// AQW build: whether frame construction is known to be a no-op for this object and
+    /// everything below it, for the rest of the current frame (see `settle`).
+    #[no_dynamic]
+    fn is_constructed(self) -> bool {
+        self.base().settled.is_set() || self.base().constructed.is_set()
+    }
+
+    #[no_dynamic]
+    fn set_constructed(self) {
+        if !settle::old_goto() {
+            self.base().constructed.set();
+        }
+    }
+
     /// AQW build: something about this object changed that frame construction or frame
     /// scripts may have to act on: it and every ancestor stop being settled.
     #[no_dynamic]
@@ -1685,12 +1704,14 @@ pub trait TDisplayObject<'gc>:
         let mut node = Some(self.into());
         while let Some(object) = node {
             let object: DisplayObject<'gc> = object;
-            // A settled object only has settled descendants, so an unsettled one means all
-            // its ancestors are unsettled already.
-            if !object.base().settled.is_set() {
+            // A settled (or constructed) object only has settled (or constructed) descendants,
+            // so one with neither mark means all its ancestors have neither already.
+            let base = object.base();
+            if !base.settled.is_set() && !base.constructed.is_set() {
                 break;
             }
-            object.base().settled.clear();
+            base.settled.clear();
+            base.constructed.clear();
             node = object.parent();
         }
     }
@@ -3562,6 +3583,14 @@ pub mod pick_matrix_cache {
 /// After the first walk in a frame almost everything is "settled": constructed, with no queued
 /// goto and no frame script left to run, so walking it again does nothing.
 ///
+/// A nested frame's frame scripts make gotos of their own, each a nested frame again that
+/// constructs the whole stage before any of those scripts has finished, so clips that still
+/// have a frame script to run (and so aren't settled) were walked for construction about ten
+/// times per goto. Hence a second mark, "constructed": set at the end of a clip's
+/// `construct_frame` in the construct phase when construction is provably done for it and
+/// all its children (`MovieClip::can_mark_constructed`), it makes `construct_frame` skip the
+/// clip while its frame scripts still run. `unsettle` clears both marks.
+///
 /// A movie clip is marked settled at the end of its `run_frame_scripts` if that is provably
 /// so for it and all its children (`MovieClip::can_settle`); `construct_frame` and
 /// `run_frame_scripts` skip settled clips. Marks only last until the next frame (the epoch is
@@ -3610,6 +3639,130 @@ pub mod settle {
 
         pub fn clear(&self) {
             self.0.set(0);
+        }
+    }
+
+    /// Whether `child` lets its parent be marked constructed: frame construction is a no-op
+    /// for it and everything below it.
+    pub fn child_is_constructed(child: super::DisplayObject<'_>) -> bool {
+        use super::{DisplayObject, TDisplayObject};
+        match child {
+            DisplayObject::MovieClip(_) | DisplayObject::LoaderDisplay(_) => child.is_constructed(),
+            DisplayObject::Graphic(_)
+            | DisplayObject::MorphShape(_)
+            | DisplayObject::Text(_)
+            | DisplayObject::EditText(_)
+            | DisplayObject::Video(_)
+            | DisplayObject::Bitmap(_) => child.object2().is_some(),
+            DisplayObject::Avm1Button(_)
+            | DisplayObject::Avm2Button(_)
+            | DisplayObject::TextLine(_)
+            | DisplayObject::Stage(_) => false,
+        }
+    }
+
+    /// `RUFFLE_OLD_GOTO_SETTLE` puts back the walks as they were before the "constructed"
+    /// mark (no such mark, a goto to the current frame unsettled its clip, a loader never
+    /// settled), for A/B comparisons.
+    pub fn old_goto() -> bool {
+        static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *OLD.get_or_init(|| std::env::var_os("RUFFLE_OLD_GOTO_SETTLE").is_some())
+    }
+
+    /// Whether `child` lets its parent settle: frame construction and frame scripts are
+    /// no-ops for it and everything below it.
+    pub fn child_is_settled(child: super::DisplayObject<'_>) -> bool {
+        use super::{DisplayObject, TDisplayObject};
+        let settled = match child {
+            // Containers that carry a mark of their own.
+            DisplayObject::MovieClip(_) | DisplayObject::LoaderDisplay(_) => child.is_settled(),
+            // Leaves whose `construct_frame` only constructs their AS3 object.
+            DisplayObject::Graphic(_)
+            | DisplayObject::MorphShape(_)
+            | DisplayObject::Text(_)
+            | DisplayObject::EditText(_)
+            | DisplayObject::Video(_)
+            | DisplayObject::Bitmap(_) => child.object2().is_some(),
+            // Buttons walk their state sprites, which have no parent while not shown and so
+            // can't unsettle the button when they change.
+            DisplayObject::Avm1Button(_) | DisplayObject::Avm2Button(_) => false,
+            // Not known to be no-ops.
+            DisplayObject::TextLine(_) | DisplayObject::Stage(_) => false,
+        };
+        if !settled && matches!(child, DisplayObject::Avm2Button(_)) {
+            stats::blocked_by_button();
+        }
+        settled
+    }
+
+    /// Counts for the perf log: how many gotos ran a nested frame, and how much of the
+    /// display list those walked.
+    pub mod stats {
+        use std::cell::Cell;
+        use std::thread::LocalKey;
+
+        thread_local! {
+            static GOTOS: Cell<u64> = const { Cell::new(0) };
+            static NO_OP_GOTOS: Cell<u64> = const { Cell::new(0) };
+            static NESTED: Cell<u32> = const { Cell::new(0) };
+            static CONSTRUCT_WALKED: Cell<u64> = const { Cell::new(0) };
+            static SCRIPT_WALKED: Cell<u64> = const { Cell::new(0) };
+            static BLOCKED_BY_BUTTON: Cell<u64> = const { Cell::new(0) };
+        }
+
+        fn add(counter: &'static LocalKey<Cell<u64>>) {
+            counter.with(|c| c.set(c.get() + 1));
+        }
+
+        fn in_nested() -> bool {
+            NESTED.with(Cell::get) > 0
+        }
+
+        pub fn goto(no_op: bool) {
+            add(&GOTOS);
+            if no_op {
+                add(&NO_OP_GOTOS);
+            }
+        }
+
+        /// Around a goto's nested frame: only its walks are counted.
+        pub fn nested(entering: bool) {
+            NESTED.with(|n| n.set(if entering { n.get() + 1 } else { n.get().saturating_sub(1) }));
+        }
+
+        /// A movie clip that wasn't marked was walked for frame construction.
+        pub fn construct_walked() {
+            if in_nested() {
+                add(&CONSTRUCT_WALKED);
+            }
+        }
+
+        /// A movie clip that wasn't settled was walked for frame scripts.
+        pub fn script_walked() {
+            if in_nested() {
+                add(&SCRIPT_WALKED);
+            }
+        }
+
+        /// A button kept its parent from settling.
+        pub fn blocked_by_button() {
+            if in_nested() {
+                add(&BLOCKED_BY_BUTTON);
+            }
+        }
+
+        /// The counts since the last call, as a line for the log.
+        pub fn take() -> String {
+            let take = |counter: &'static LocalKey<Cell<u64>>| counter.with(|c| c.replace(0));
+            format!(
+                "{} gotos ({} to the frame they were on); their nested frames walked {} clips for \
+                 construction and {} for frame scripts; a button kept {} clips from settling",
+                take(&GOTOS),
+                take(&NO_OP_GOTOS),
+                take(&CONSTRUCT_WALKED),
+                take(&SCRIPT_WALKED),
+                take(&BLOCKED_BY_BUTTON),
+            )
         }
     }
 }

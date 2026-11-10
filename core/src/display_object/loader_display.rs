@@ -110,8 +110,39 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
     }
 
     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
+        // AQW build: nothing to construct below (see `display_object::settle`).
+        if self.is_constructed() {
+            return;
+        }
         for child in self.iter_render_list() {
             child.construct_frame(context);
+        }
+        if self
+            .iter_render_list()
+            .all(crate::display_object::settle::child_is_constructed)
+        {
+            self.set_constructed();
+        }
+    }
+
+    fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
+        // AQW build: no frame script to run below (see `display_object::settle`).
+        if self.is_settled() {
+            return;
+        }
+        for child in self.iter_render_list() {
+            child.run_frame_scripts(context);
+        }
+        // AQW build: a loader only passes both walks on to its children, so it's settled
+        // when they are. AQW keeps a `Loader` for every file it loaded, on the stage (the
+        // game itself, the map) or off it (orphans, walked on every goto), and an unsettled
+        // one kept all its ancestors from settling.
+        if !crate::display_object::settle::old_goto()
+            && self
+                .iter_render_list()
+                .all(crate::display_object::settle::child_is_settled)
+        {
+            self.set_settled();
         }
     }
 
@@ -211,6 +242,8 @@ impl<'gc> TDisplayObjectContainer<'gc> for LoaderDisplay<'gc> {
     }
 
     fn raw_container_mut(&self, gc_context: &Mutation<'gc>) -> RefMut<'_, ChildContainer<'gc>> {
+        // AQW build: its children change (see `display_object::settle`).
+        self.unsettle();
         unlock!(Gc::write(gc_context, self.0), LoaderDisplayData, container).borrow_mut()
     }
 }

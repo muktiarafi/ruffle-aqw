@@ -14,6 +14,9 @@ pub use tessellation_cache::evict_unused as evict_unused_shapes;
 pub use display_object::graphic::deferred_shapes::set_wait as set_shape_wait;
 /// AQW build: frame interpolation (an option, off by default).
 pub use display_object::interp as frame_interpolation;
+/// AQW build, for the perf log: the gotos since the last call and what their nested frames
+/// walked (see `display_object::settle`).
+pub use display_object::settle::stats::take as take_goto_stats;
 
 /// Turu: the thread-local state that belongs to one player: its queued and running shape
 /// tessellations (`deferred_shapes`), the change count its recorded pictures are checked

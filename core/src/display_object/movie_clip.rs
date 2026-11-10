@@ -951,7 +951,6 @@ impl<'gc> MovieClip<'gc> {
     /// This is treated as an 'explicit' goto: frame scripts and other frame
     /// lifecycle events will be retriggered.
     pub fn goto_frame(self, context: &mut UpdateContext<'gc>, goto_info: GotoInfo) {
-        self.unsettle();
         // Clamp frame number in bounds.
         let goto_info = GotoInfo {
             frame: goto_info.frame.max(1),
@@ -961,6 +960,7 @@ impl<'gc> MovieClip<'gc> {
         // AVM2 does not allow a clip to goto while it is executing a frame script.
         // The goto is instead queued and run once the frame script is completed.
         if self.is_executing_avm2_frame_script() {
+            self.unsettle();
             if self.swf_version() <= 9 && goto_info.frame == self.current_frame() {
                 // When in SWFv9 and a "queued" goto is triggered to the current
                 // frame, the goto will be run immediately. This will result in
@@ -988,7 +988,16 @@ impl<'gc> MovieClip<'gc> {
     }
 
     fn goto_frame_now(self, context: &mut UpdateContext<'gc>, goto_info: GotoInfo) {
-        self.unsettle();
+        // AQW build: a goto to the frame the clip is already on gives it nothing to construct
+        // and no frame script to run: it only stops or plays the clip and drops a queued goto
+        // (which had unsettled the clip when it was queued). So a settled clip stays settled,
+        // and the nested frame below skips it and its settled ancestors instead of walking
+        // down to it again (AQW makes dozens of such gotos a frame; see `settle`).
+        let no_op = goto_info.frame == self.current_frame();
+        if !no_op || crate::display_object::settle::old_goto() {
+            self.unsettle();
+        }
+        crate::display_object::settle::stats::goto(no_op);
         match goto_info.stop_or_play {
             StopOrPlay::Stop => self.stop(context),
             StopOrPlay::Play => self.play(),
@@ -2235,22 +2244,27 @@ impl<'gc> MovieClip<'gc> {
                 return false;
             }
         }
-        self.iter_render_list().all(|child| {
-            if let Some(clip) = child.as_movie_clip() {
-                clip.is_settled()
-            } else {
-                // Leaves whose `construct_frame` only constructs their AS3 object.
-                matches!(
-                    child,
-                    DisplayObject::Graphic(_)
-                        | DisplayObject::MorphShape(_)
-                        | DisplayObject::Text(_)
-                        | DisplayObject::EditText(_)
-                        | DisplayObject::Video(_)
-                        | DisplayObject::Bitmap(_)
-                ) && child.object2().is_some()
-            }
-        })
+        self.iter_render_list()
+            .all(crate::display_object::settle::child_is_settled)
+    }
+
+    /// AQW build: whether `construct_frame` is a no-op for this clip and all its children
+    /// until something changes (see `display_object::settle`). Evaluated at the end of
+    /// `construct_frame` in the construct phase, after it walked the children: every
+    /// condition it acts on must be false here.
+    fn can_mark_constructed(self) -> bool {
+        let data = &self.0;
+        data.object2.get().is_some()
+            && data.initialized()
+            && !data.contains_flag(MovieClipFlags::LOOP_QUEUED)
+            && !data.contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME)
+            && self.frames_loaded() >= self.header_frames() as i32
+            && self.movie().is_action_script_3()
+            // `check_has_pending_script` must leave the flag as it is.
+            && self.has_pending_script() == self.has_frame_script(data.current_frame.get())
+            && self
+                .iter_render_list()
+                .all(crate::display_object::settle::child_is_constructed)
     }
 
     pub fn register_frame_script(
@@ -2706,15 +2720,19 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     /// Construct objects placed on this frame.
     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
         // AQW build: nothing to construct here or below (see `display_object::settle`).
-        if self.is_settled() {
+        if self.is_constructed() {
             return;
         }
+        crate::display_object::settle::stats::construct_walked();
+        // AQW build: whether this call only walked the children (see below).
+        let mut walked_children = false;
         // AVM1 code expects to execute in line with timeline instructions, so
         // it's exempted from frame construction.
         if self.movie().is_action_script_3()
             && (self.frames_loaded() >= 1 || self.header_frames() == 0)
         {
             let is_load_frame = !self.0.initialized();
+            walked_children = !is_load_frame && self.0.object2.get().is_some();
             let needs_construction = if self.0.object2.get().is_none() {
                 self.allocate_as_avm2_object(context, self.into());
                 true
@@ -2769,6 +2787,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
             // Check for frame-scripts before starting the frame-script phase,
             // to differentiate the pre-existing scripts from those introduced during frame-script phase.
             self.check_has_pending_script();
+            // AQW build: this clip and its children are constructed, and until something
+            // changes (`unsettle`) another call would do nothing (see `display_object::settle`).
+            // `check_has_pending_script` unsettles, so the mark comes after it.
+            if walked_children && self.can_mark_constructed() {
+                self.set_constructed();
+            }
         }
     }
 
@@ -2777,6 +2801,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         if self.is_settled() {
             return;
         }
+        crate::display_object::settle::stats::script_walked();
         self.run_local_frame_scripts(context);
 
         for child in self.iter_render_list() {
