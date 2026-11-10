@@ -14,6 +14,7 @@ use crate::display_object::container::{dispatch_added_event, dispatch_removed_ev
 use crate::display_object::interactive::{InteractiveObjectBase, TInteractiveObject};
 use crate::display_object::{BoundsMode, DisplayObjectBase, MovieClip};
 use crate::events::{ClipEvent, ClipEventResult};
+use crate::frame_lifecycle::FramePhase;
 use crate::frame_lifecycle::{
     broadcast_frame_constructed, broadcast_frame_exited, catchup_display_object_to_frame,
 };
@@ -321,6 +322,16 @@ impl<'gc> Avm2Button<'gc> {
         children.into_iter().filter_map(Lock::get)
     }
 
+    /// AQW build: whether `check` holds for all four states, shown or not (see
+    /// `display_object::settle`).
+    fn states_all(self, check: fn(DisplayObject<'gc>) -> bool) -> bool {
+        crate::display_object::settle::buttons_active()
+            && !self.0.needs_frame_construction.get()
+            && self.0.object.get().is_some()
+            && !self.0.weird_framescript_order.get()
+            && self.all_state_children(false).all(check)
+    }
+
     /// Get the display object that represents a particular button state.
     pub fn get_state_child(self, state: swf::ButtonState) -> Option<DisplayObject<'gc>> {
         match state {
@@ -350,6 +361,15 @@ impl<'gc> Avm2Button<'gc> {
             swf::ButtonState::DOWN => unlock!(write, Avm2ButtonData, down_state).set(child),
             swf::ButtonState::HIT_TEST => unlock!(write, Avm2ButtonData, hit_area).set(child),
             _ => (),
+        }
+
+        // AQW build: the marks counted on the old state (see `display_object::settle`).
+        self.unsettle();
+        if let Some(old_state_child) = old_state_child {
+            old_state_child.base().set_button_state(false);
+        }
+        if let Some(child) = child {
+            child.base().set_button_state(true);
         }
 
         if let Some(child) = child {
@@ -444,12 +464,20 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
     }
 
     fn enter_frame(self, context: &mut UpdateContext<'gc>) {
+        // AQW build: nothing to do here or below (see `display_object::settle`).
+        if self.is_dormant() {
+            return;
+        }
         for state in self.all_state_children(false) {
             state.enter_frame(context);
         }
     }
 
     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
+        // AQW build: constructed, and so is everything below (see `display_object::settle`).
+        if self.is_constructed() {
+            return;
+        }
         for state in self.all_state_children(false) {
             state.construct_frame(context);
         }
@@ -495,6 +523,10 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
             unlock!(write, Avm2ButtonData, down_state).set(Some(down_state));
             unlock!(write, Avm2ButtonData, hit_area).set(Some(hit_area));
             write.skip_current_frame.set(true);
+            for state in [up_state, over_state, down_state, hit_area] {
+                // AQW build: see `DisplayObjectFlags::BUTTON_STATE`.
+                state.base().set_button_state(true);
+            }
 
             let mut fire_state_events = |should_fire, state: DisplayObject<'gc>| {
                 if should_fire {
@@ -569,11 +601,28 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
                 self.fire_added_events(context);
             }
         }
+
+        // AQW build: another call would do nothing until something changes (`unsettle`).
+        if *context.frame_phase == FramePhase::Construct
+            && self.states_all(crate::display_object::settle::child_is_constructed)
+        {
+            self.set_constructed();
+        }
     }
 
     fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
+        // AQW build: no frame script to run below (see `display_object::settle`).
+        if self.is_settled() {
+            return;
+        }
         for state in self.all_state_children(self.0.weird_framescript_order.take()) {
             state.run_frame_scripts(context);
+        }
+        if self.states_all(crate::display_object::settle::child_is_settled) {
+            self.set_settled();
+            if self.states_all(crate::display_object::settle::child_is_dormant) {
+                self.set_dormant();
+            }
         }
     }
 

@@ -738,6 +738,14 @@ impl<'gc> DisplayObjectBase<'gc> {
         self.contains_flag(DisplayObjectFlags::AVM1_PENDING_REMOVAL)
     }
 
+    pub fn is_button_state(&self) -> bool {
+        self.contains_flag(DisplayObjectFlags::BUTTON_STATE)
+    }
+
+    pub fn set_button_state(&self, is_state: bool) {
+        self.set_flag(DisplayObjectFlags::BUTTON_STATE, is_state);
+    }
+
     pub fn should_skip_next_enter_frame(&self) -> bool {
         self.contains_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME)
     }
@@ -1729,10 +1737,16 @@ pub trait TDisplayObject<'gc>:
             if !base.settled.is_set() && !base.constructed.is_set() && !base.dormant.is_set() {
                 break;
             }
+            let was_dormant = base.dormant.is_set();
             base.settled.clear();
             base.constructed.clear();
             base.dormant.clear();
             node = object.parent();
+            // A button's state that isn't shown: the button and its ancestors hold marks
+            // that counted on this one, and there's no way up to them from here.
+            if node.is_none() && base.is_button_state() {
+                settle::wake_all(was_dormant);
+            }
         }
     }
 
@@ -3302,6 +3316,11 @@ bitflags! {
         /// (they need to be instantiated "manually" by
         /// `Sprite.constructChildren`).
         const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
+
+        /// AQW build: this object is one of a `SimpleButton`'s states. A state that isn't
+        /// shown has no parent, so a change in it can't unsettle the button by walking up
+        /// (see `settle::wake_all`).
+        const BUTTON_STATE            = 1 << 17;
     }
 }
 
@@ -3656,6 +3675,24 @@ pub mod settle {
         if turn > 0 {
             DORMANT_PAUSED.store((epoch / turn) % 2 == 1, Ordering::Relaxed);
         }
+        // `RUFFLE_BUTTON_AB=<frames>`: the same for the marks of buttons.
+        static BUTTON_TURN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let turn = *BUTTON_TURN.get_or_init(|| {
+            std::env::var("RUFFLE_BUTTON_AB").ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+        });
+        if turn > 0 {
+            BUTTONS_PAUSED.store((epoch / turn) % 2 == 1, Ordering::Relaxed);
+        }
+    }
+
+    static BUTTONS_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Whether buttons take marks right now (`RUFFLE_NO_BUTTON_MARKS` turns them off: a
+    /// button then keeps its ancestors from settling, as before).
+    pub fn buttons_active() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("RUFFLE_NO_BUTTON_MARKS").is_none())
+            && !BUTTONS_PAUSED.load(Ordering::Relaxed)
     }
 
     static DORMANT_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3669,6 +3706,19 @@ pub mod settle {
     pub fn dormant_enabled() -> bool {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ENABLED.get_or_init(|| std::env::var_os("RUFFLE_NO_DORMANT").is_none() && enabled() && !old_goto())
+    }
+
+    /// Takes every mark of every object away (and the dormant ones too, if `dormant`): for a
+    /// change that can't tell the objects whose marks counted on it, which is a change in a
+    /// button's state that isn't shown (no parent to walk up to). Rare: scripts seldom touch
+    /// those, and a state with something playing in it never has a mark to lose after its
+    /// frame was entered.
+    pub fn wake_all(dormant: bool) {
+        EPOCH.fetch_add(1, Ordering::Relaxed);
+        if dormant {
+            DORMANT_EPOCH.fetch_add(1, Ordering::Relaxed);
+        }
+        stats::woke_all();
     }
 
     /// The dormant epoch an object went dormant in (0 = not dormant). Unlike a settled mark
@@ -3703,7 +3753,9 @@ pub mod settle {
     pub fn child_is_dormant(child: super::DisplayObject<'_>) -> bool {
         use super::{DisplayObject, TDisplayObject};
         match child {
-            DisplayObject::MovieClip(_) | DisplayObject::LoaderDisplay(_) => child.is_dormant(),
+            DisplayObject::MovieClip(_) | DisplayObject::LoaderDisplay(_) | DisplayObject::Avm2Button(_) => {
+                child.is_dormant()
+            }
             // Leaves that do nothing when a frame is entered.
             DisplayObject::Graphic(_)
             | DisplayObject::MorphShape(_)
@@ -3712,7 +3764,6 @@ pub mod settle {
             | DisplayObject::Video(_)
             | DisplayObject::Bitmap(_) => true,
             DisplayObject::Avm1Button(_)
-            | DisplayObject::Avm2Button(_)
             | DisplayObject::TextLine(_)
             | DisplayObject::Stage(_) => false,
         }
@@ -3756,7 +3807,9 @@ pub mod settle {
     pub fn child_is_constructed(child: super::DisplayObject<'_>) -> bool {
         use super::{DisplayObject, TDisplayObject};
         match child {
-            DisplayObject::MovieClip(_) | DisplayObject::LoaderDisplay(_) => child.is_constructed(),
+            DisplayObject::MovieClip(_) | DisplayObject::LoaderDisplay(_) | DisplayObject::Avm2Button(_) => {
+                child.is_constructed()
+            }
             DisplayObject::Graphic(_)
             | DisplayObject::MorphShape(_)
             | DisplayObject::Text(_)
@@ -3764,7 +3817,6 @@ pub mod settle {
             | DisplayObject::Video(_)
             | DisplayObject::Bitmap(_) => child.object2().is_some(),
             DisplayObject::Avm1Button(_)
-            | DisplayObject::Avm2Button(_)
             | DisplayObject::TextLine(_)
             | DisplayObject::Stage(_) => false,
         }
@@ -3792,9 +3844,10 @@ pub mod settle {
             | DisplayObject::EditText(_)
             | DisplayObject::Video(_)
             | DisplayObject::Bitmap(_) => child.object2().is_some(),
-            // Buttons walk their state sprites, which have no parent while not shown and so
-            // can't unsettle the button when they change.
-            DisplayObject::Avm1Button(_) | DisplayObject::Avm2Button(_) => false,
+            // A button carries a mark for its four states (`Avm2Button::states_all`); the ones
+            // not shown have no parent and wake everything when they change (`wake_all`).
+            DisplayObject::Avm2Button(_) => child.is_settled(),
+            DisplayObject::Avm1Button(_) => false,
             // Not known to be no-ops.
             DisplayObject::TextLine(_) | DisplayObject::Stage(_) => false,
         };
@@ -3817,6 +3870,7 @@ pub mod settle {
             static CONSTRUCT_WALKED: Cell<u64> = const { Cell::new(0) };
             static SCRIPT_WALKED: Cell<u64> = const { Cell::new(0) };
             static BLOCKED_BY_BUTTON: Cell<u64> = const { Cell::new(0) };
+            static WOKE_ALL: Cell<u64> = const { Cell::new(0) };
         }
 
         fn add(counter: &'static LocalKey<Cell<u64>>) {
@@ -3860,18 +3914,26 @@ pub mod settle {
             }
         }
 
+        /// A change in a button's hidden state took every mark away.
+        pub fn woke_all() {
+            add(&WOKE_ALL);
+        }
+
         /// The counts since the last call, as a line for the log.
         pub fn take() -> String {
             let take = |counter: &'static LocalKey<Cell<u64>>| counter.with(|c| c.replace(0));
             format!(
-                "dormant marks {}; {} gotos ({} to the frame they were on); their nested frames walked {} clips for \
-                 construction and {} for frame scripts; a button kept {} clips from settling",
+                "dormant marks {}, button marks {}; {} gotos ({} to the frame they were on); their nested frames walked {} clips for \
+                 construction and {} for frame scripts; a button kept {} clips from settling; hidden button states \
+                 took all marks away {} times",
                 if super::dormant_active() { "on" } else { "off" },
+                if super::buttons_active() { "on" } else { "off" },
                 take(&GOTOS),
                 take(&NO_OP_GOTOS),
                 take(&CONSTRUCT_WALKED),
                 take(&SCRIPT_WALKED),
                 take(&BLOCKED_BY_BUTTON),
+                take(&WOKE_ALL),
             )
         }
     }
