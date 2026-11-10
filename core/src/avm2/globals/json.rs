@@ -260,6 +260,141 @@ impl<'gc> AvmSerializer<'gc> {
         })
     }
 
+    /// AQW build: `serialize` without a replacer, written straight into `out` as compact JSON
+    /// instead of building a `JsonValue` tree first. Turu's bot reads the game through
+    /// `JSON.stringify` (an inventory is 0.4 MB, a bank 0.9 MB), and the tree (a map entry and
+    /// two strings per property) was half of that time. The text is the same, byte for byte:
+    /// scalars and strings go through serde_json as before, and an object whose keys the tree
+    /// could have merged (the same name twice) still goes through the tree.
+    fn write(
+        &mut self,
+        activation: &mut Activation<'_, 'gc>,
+        value: Value<'gc>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error<'gc>> {
+        let empty = istr!("");
+        let mapped = self.map_value(activation, || empty, value)?;
+        self.write_value(activation, mapped, out)
+    }
+
+    fn write_value(
+        &mut self,
+        activation: &mut Activation<'_, 'gc>,
+        value: Value<'gc>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error<'gc>> {
+        fn scalar<T: Serialize>(out: &mut Vec<u8>, value: T) {
+            serde_json::to_writer(out, &value).expect("JSON serialization cannot fail");
+        }
+        match value.normalize() {
+            Value::Null | Value::Undefined => out.extend_from_slice(b"null"),
+            Value::Integer(i) => scalar(out, i),
+            // As `JsonValue::from(f64)`: NaN and the infinities are null.
+            Value::Number(n) => scalar(out, n),
+            Value::Bool(b) => scalar(out, b),
+            Value::String(s) => scalar(out, s.to_utf8_lossy().deref()),
+            Value::Object(obj) => {
+                if self.obj_stack.contains(&obj) {
+                    return Err(make_error_1129(activation));
+                }
+                self.obj_stack.push(obj);
+                if obj.as_function_object().is_some() {
+                    out.extend_from_slice(b"null");
+                } else if obj.as_array_object().is_some() || obj.as_vector_object().is_some() {
+                    out.push(b'[');
+                    let mut first = true;
+                    let mut iter = ArrayIter::new(activation, obj)?;
+                    while let Some((i, item)) = iter.next(activation)? {
+                        let mc = activation.gc();
+                        let mapped = self.map_value(
+                            activation,
+                            || AvmString::new_utf8(mc, i.to_string()),
+                            item,
+                        )?;
+                        if !std::mem::take(&mut first) {
+                            out.push(b',');
+                        }
+                        self.write_value(activation, mapped, out)?;
+                    }
+                    out.push(b']');
+                } else if matches!(obj, Object::ScriptObject(_)) {
+                    self.write_object(activation, obj, out)?;
+                } else {
+                    // Objects that enumerate their own way (a proxy, a dictionary) may name a
+                    // key twice, which the tree merges.
+                    let tree = self.serialize_object(activation, obj)?;
+                    scalar(out, &tree);
+                }
+                self.obj_stack
+                    .pop()
+                    .expect("Stack underflow during JSON serialization");
+            }
+        }
+        Ok(())
+    }
+
+    /// A plain object: its public properties, then its dynamic ones (whose names are unique).
+    fn write_object(
+        &mut self,
+        activation: &mut Activation<'_, 'gc>,
+        obj: Object<'gc>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error<'gc>> {
+        fn skip_value<'gc>(value: Value<'gc>) -> bool {
+            match value {
+                Value::Undefined => true,
+                Value::Object(obj) => obj.as_function_object().is_some(),
+                _ => false,
+            }
+        }
+        fn key(out: &mut Vec<u8>, first: &mut bool, name: AvmString<'_>) {
+            if !std::mem::take(first) {
+                out.push(b',');
+            }
+            serde_json::to_writer(&mut *out, name.to_utf8_lossy().deref())
+                .expect("JSON serialization cannot fail");
+            out.push(b':');
+        }
+
+        let start = out.len();
+        out.push(b'{');
+        let mut first = true;
+        let fixed = obj.public_vtable_properties(activation)?;
+        for &(name, val) in &fixed {
+            let mapped = self.map_value(activation, || name, val)?;
+            if !skip_value(mapped) {
+                key(out, &mut first, name);
+                self.write_value(activation, mapped, out)?;
+            }
+        }
+        for i in 1.. {
+            match obj.get_enumerant_name(i, activation)? {
+                Value::Null => break,
+                name_val => {
+                    let name = name_val.coerce_to_string(activation)?;
+                    if fixed.iter().any(|(fixed, _)| *fixed == name) {
+                        // A name for the second time: the tree keeps its first place with
+                        // the last value, so this object is written from the tree. Its
+                        // properties are read again, as nothing here can undo the first read.
+                        out.truncate(start);
+                        let tree = self.serialize_object(activation, obj)?;
+                        serde_json::to_writer(&mut *out, &tree)
+                            .expect("JSON serialization cannot fail");
+                        return Ok(());
+                    }
+                    let value = obj.get_enumerant_value(i, activation)?;
+                    let mapped = self.map_value(activation, || name, value)?;
+                    if !skip_value(mapped) {
+                        key(out, &mut first, name);
+                        self.write_value(activation, mapped, out)?;
+                    }
+                }
+            }
+        }
+        out.push(b'}');
+        Ok(())
+    }
+
     /// Same thing as serialize_value, but maps the value before calling it.
     fn serialize(
         &mut self,
@@ -291,6 +426,12 @@ pub fn parse_core<'gc>(
     };
 
     deserialize_json(activation, parsed, reviver)
+}
+
+/// `RUFFLE_JSON_TREE` puts `JSON.stringify`'s tree back for every call, for A/B comparisons.
+fn direct_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUFFLE_JSON_TREE").is_none())
 }
 
 /// Implements `JSON.stringify`.
@@ -345,6 +486,29 @@ pub fn stringify<'gc>(
     };
 
     let mut serializer = AvmSerializer::new(replacer);
+    // AQW build: the plain call needs no tree (see `AvmSerializer::write`).
+    if serializer.replacer.is_none() && indent.is_none() && direct_enabled() {
+        let mut result = Vec::with_capacity(128);
+        serializer.write(activation, val, &mut result)?;
+        // `RUFFLE_JSON_CHECK`: also builds the tree and says when its text differs.
+        static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *CHECK.get_or_init(|| std::env::var_os("RUFFLE_JSON_CHECK").is_some()) {
+            static CHECKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let tree = AvmSerializer::new(None).serialize(activation, val)?;
+            let tree = serde_json::to_vec(&tree).expect("JSON serialization cannot fail");
+            let n = CHECKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if tree != result {
+                tracing::error!(
+                    "JSON.stringify: the direct text differs from the tree's ({} and {} bytes)",
+                    result.len(),
+                    tree.len()
+                );
+            } else if n % 5000 == 0 {
+                tracing::info!(target: "ruffle_aqw_perf", "JSON.stringify: {n} texts checked against the tree");
+            }
+        }
+        return Ok(AvmString::new_utf8_bytes(activation.gc(), &result).into());
+    }
     let json = serializer.serialize(activation, val)?;
     let result = match indent {
         Some(indent) => {
