@@ -627,7 +627,11 @@ impl Player {
         self.update_sockets();
         self.update_net_connections();
         self.update_timers(dt);
-        self.update(|context| {
+        // AQW build: no hit-test here. The frame that ran above did one, pointer and button
+        // events do their own, and nothing is drawn before the next frame; ticks come far
+        // more often than frames (every wake of the event loop, so every bot call), and a
+        // hit-test of a crowded room takes about a millisecond.
+        self.update_inner(false, |context| {
             StreamManager::tick(context, dt);
         });
         self.audio.tick();
@@ -3010,6 +3014,14 @@ impl Player {
     where
         F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
     {
+        self.update_inner(true, func)
+    }
+
+    /// [`Self::update`]; `pick` says whether to look for a newly hovered object afterwards.
+    fn update_inner<F, R>(&mut self, pick: bool, func: F) -> R
+    where
+        F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
+    {
         let rval = self.mutate_with_update_context(|context| {
             let rval = func(context);
 
@@ -3022,7 +3034,9 @@ impl Player {
         self.mutate_with_update_context(|context| {
             Self::update_drag(context);
         });
-        self.update_mouse_state(EnumSet::empty(), false, &mut false);
+        if pick {
+            self.update_mouse_state(EnumSet::empty(), false, &mut false);
+        }
 
         // GC
         Self::collect_garbage(&mut self.gc_arena.borrow_mut(), &self.swf);
