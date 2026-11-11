@@ -1,3 +1,4 @@
+use crate::backends::navigator::cache::CacheWriter;
 use reqwest::Response as ReqwestResponse;
 use ruffle_core::backend::navigator::{OwnedFuture, SuccessResponse};
 use ruffle_core::loader::Error;
@@ -22,6 +23,29 @@ pub struct Response {
     pub text_encoding: Option<&'static Encoding>,
     pub status: u16,
     pub redirected: bool,
+    /// AQW build: collects a network body for the disk cache as it is read (see `cache.rs`).
+    pub cache: Option<Arc<Mutex<Option<CacheWriter>>>>,
+}
+
+/// AQW build: hands a chunk of a network body to the cache's writer, if there is one.
+/// `None` is the end of the body, which stores it.
+fn cache_chunk(cache: &Option<Arc<Mutex<Option<CacheWriter>>>>, chunk: Option<&[u8]>) {
+    let Some(cache) = cache else {
+        return;
+    };
+    let mut writer = cache.lock().expect("cache writer lock");
+    match chunk {
+        Some(chunk) => {
+            if writer.as_mut().is_some_and(|writer| !writer.push(chunk)) {
+                *writer = None;
+            }
+        }
+        None => {
+            if let Some(writer) = writer.take() {
+                writer.finish();
+            }
+        }
+    }
 }
 
 impl SuccessResponse for Response {
@@ -39,17 +63,23 @@ impl SuccessResponse for Response {
             ResponseBody::File(file) => {
                 Box::pin(async move { file.map_err(|e| Error::FetchError(e.to_string())) })
             }
-            ResponseBody::Network(response) => Box::pin(async move {
-                Ok(response
-                    .lock()
-                    .expect("working lock during fetch body read")
-                    .take()
-                    .expect("Body cannot already be consumed")
-                    .bytes()
-                    .await
-                    .map_err(|e| Error::FetchError(e.to_string()))?
-                    .to_vec())
-            }),
+            ResponseBody::Network(response) => {
+                let cache = self.cache;
+                Box::pin(async move {
+                    let body = response
+                        .lock()
+                        .expect("working lock during fetch body read")
+                        .take()
+                        .expect("Body cannot already be consumed")
+                        .bytes()
+                        .await
+                        .map_err(|e| Error::FetchError(e.to_string()))?
+                        .to_vec();
+                    cache_chunk(&cache, Some(&body));
+                    cache_chunk(&cache, None);
+                    Ok(body)
+                })
+            }
         }
     }
 
@@ -84,6 +114,7 @@ impl SuccessResponse for Response {
             }
             ResponseBody::Network(response) => {
                 let response = response.clone();
+                let cache = self.cache.clone();
                 Box::pin(async move {
                     let lock = response.try_lock();
                     if matches!(lock, Err(std::sync::TryLockError::WouldBlock)) {
@@ -101,8 +132,14 @@ impl SuccessResponse for Response {
                         .await;
 
                     match result {
-                        Ok(Some(bytes)) => Ok(Some(bytes.to_vec())),
-                        Ok(None) => Ok(None),
+                        Ok(Some(bytes)) => {
+                            cache_chunk(&cache, Some(&bytes));
+                            Ok(Some(bytes.to_vec()))
+                        }
+                        Ok(None) => {
+                            cache_chunk(&cache, None);
+                            Ok(None)
+                        }
                         Err(e) => Err(Error::FetchError(e.to_string())),
                     }
                 })

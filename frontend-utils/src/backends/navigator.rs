@@ -1,5 +1,8 @@
+mod cache;
 mod fetch;
 
+pub use crate::backends::navigator::cache::{CacheStats, HttpCache};
+use crate::backends::navigator::cache::{CacheWriter, Policy};
 use crate::backends::navigator::fetch::{Response, ResponseBody};
 use crate::content::PlayingContent;
 use async_channel::{Receiver, Sender, TryRecvError};
@@ -64,6 +67,10 @@ pub struct ExternalNavigatorBackend<F: FutureSpawner<Error>, I: NavigatorInterfa
     content: Rc<PlayingContent>,
 
     interface: I,
+
+    /// AQW build: the disk cache for cacheable downloads (see `cache.rs`); `None`: every
+    /// request goes to the network, as in Ruffle.
+    http_cache: Option<Arc<HttpCache>>,
 }
 
 impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F, I> {
@@ -130,7 +137,14 @@ impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F,
             socket_mode,
             content,
             interface,
+            http_cache: None,
         }
+    }
+
+    /// AQW build: answers cacheable downloads from `cache`, and keeps them there.
+    pub fn with_http_cache(mut self, cache: Option<Arc<HttpCache>>) -> Self {
+        self.http_cache = cache;
+        self
     }
 }
 
@@ -195,6 +209,12 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
         };
 
         let client = self.client.clone();
+        // AQW build: only a plain GET can be answered from the cache or kept in it.
+        let http_cache = self.http_cache.clone().filter(|_| {
+            request.method() == NavigationMethod::Get
+                && request.body().is_none()
+                && request.headers().is_empty()
+        });
 
         match processed_url.scheme() {
             "file" => {
@@ -217,6 +237,7 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                         text_encoding: None,
                         status: 0,
                         redirected: false,
+                        cache: None,
                     });
 
                     Ok(response)
@@ -228,6 +249,39 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     error: Error::FetchError("Network unavailable".to_string()),
                 })?;
 
+                // AQW build: the disk cache. A fresh entry is the answer; a stale one (or one
+                // fetched with another query string) is checked with the server below.
+                let cached = match &http_cache {
+                    Some(cache) => {
+                        let (cache, url) = (cache.clone(), processed_url.clone());
+                        spawn_tokio(async move {
+                            tokio::task::spawn_blocking(move || cache.lookup(&url))
+                                .await
+                                .ok()
+                                .flatten()
+                        })
+                        .await
+                    }
+                    None => None,
+                };
+                let from_cache = |entry: cache::Entry| -> Box<dyn SuccessResponse> {
+                    Box::new(Response {
+                        url: processed_url.to_string(),
+                        text_encoding: get_encoding(&entry.meta.content_type),
+                        response_body: ResponseBody::File(Ok(entry.body)),
+                        status: 200,
+                        redirected: false,
+                        cache: None,
+                    })
+                };
+                let cached = match (cached, &http_cache) {
+                    (Some(entry), Some(cache)) if entry.meta.is_fresh(&processed_url) => {
+                        cache.count_served(&entry, false);
+                        return Ok(from_cache(entry));
+                    }
+                    (cached, _) => cached,
+                };
+
                 let build_request = || {
                     let mut request_builder = match request.method() {
                         NavigationMethod::Get => client.get(processed_url.clone()),
@@ -237,7 +291,19 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     for (name, val) in request.headers().iter() {
                         request_builder = request_builder.header(name, val);
                     }
-                    request_builder.header("Content-Type", &mime).body(body_data)
+                    if let Some(entry) = &cached {
+                        if !entry.meta.etag.is_empty() {
+                            request_builder =
+                                request_builder.header(header::IF_NONE_MATCH, &entry.meta.etag);
+                        }
+                        if !entry.meta.last_modified.is_empty() {
+                            request_builder = request_builder
+                                .header(header::IF_MODIFIED_SINCE, &entry.meta.last_modified);
+                        }
+                    }
+                    request_builder
+                        .header("Content-Type", &mime)
+                        .body(body_data)
                 };
 
                 // AQW build (macOS): a DNS or connection hiccup while the game starts used to
@@ -265,6 +331,32 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                 };
                 #[cfg(not(target_os = "macos"))]
                 let response = spawn_tokio(build_request().send()).await;
+
+                // AQW build: with the network down, a cached file is better than none.
+                let response = match (response, cached, &http_cache) {
+                    (Err(e), Some(entry), Some(cache)) => {
+                        tracing::warn!(
+                            "Couldn't check {processed_url} with the server ({e}); using the cached file"
+                        );
+                        cache.count_served(&entry, true);
+                        return Ok(from_cache(entry));
+                    }
+                    (Ok(response), Some(entry), Some(cache))
+                        if response.status() == reqwest::StatusCode::NOT_MODIFIED =>
+                    {
+                        // Unchanged: fresh again, for this query string.
+                        if let Some(policy) = Policy::of_revalidation(response.headers()) {
+                            let (cache, url, meta) =
+                                (cache.clone(), processed_url.clone(), entry.meta.clone());
+                            tokio::task::spawn_blocking(move || {
+                                cache.refresh(&url, &meta, &policy)
+                            });
+                        }
+                        cache.count_served(&entry, true);
+                        return Ok(from_cache(entry));
+                    }
+                    (response, _, _) => response,
+                };
 
                 let response = response.map_err(|e| {
                     let inner = if e.is_connect() {
@@ -296,12 +388,22 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     return Err(ErrorResponse { url, error });
                 }
 
+                // AQW build: keep what the server allows keeping, as its body is read.
+                let cache = http_cache
+                    .filter(|_| status == 200 && !redirected)
+                    .and_then(|cache| {
+                        let policy = Policy::of_response(response.headers())?;
+                        let writer = CacheWriter::new(cache, processed_url.clone(), policy);
+                        Some(Arc::new(Mutex::new(Some(writer))))
+                    });
+
                 let response: Box<dyn SuccessResponse> = Box::new(Response {
                     url,
                     response_body: ResponseBody::Network(Arc::new(Mutex::new(Some(response)))),
                     text_encoding,
                     status,
                     redirected,
+                    cache,
                 });
                 Ok(response)
             }),
@@ -803,5 +905,133 @@ mod tests {
         client_write.close();
 
         assert_eq!(read_server(&mut server_socket).await, "Sending some data");
+    }
+
+    /// AQW build: a server with one game file, as AQW's CDN serves them. Answers `304` to a
+    /// request with the file's `ETag`, and counts the requests and the bodies it sent.
+    async fn serve_game_file(
+        listener: TcpListener,
+        requests: Arc<Mutex<Vec<String>>>,
+        bodies: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                match socket.read(&mut buffer).await {
+                    Ok(n) if n > 0 => request.extend_from_slice(&buffer[..n]),
+                    _ => break,
+                }
+            }
+            let request = String::from_utf8_lossy(&request).to_lowercase();
+            let headers =
+                "cache-control: public, max-age=2678400\r\netag: \"v1\"\r\nconnection: close\r\n";
+            let response = if request.contains("if-none-match: \"v1\"") {
+                format!("HTTP/1.1 304 Not Modified\r\n{headers}\r\n")
+            } else {
+                bodies.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                format!("HTTP/1.1 200 OK\r\n{headers}content-length: 5\r\n\r\nhello")
+            };
+            requests
+                .lock()
+                .unwrap()
+                .push(request.lines().next().unwrap_or_default().to_string());
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    }
+
+    async fn fetch_chunks(
+        backend: &ExternalNavigatorBackend<TestFutureSpawner, ()>,
+        url: &str,
+    ) -> Vec<u8> {
+        let mut response = backend
+            .fetch(Request::get(url.to_string()))
+            .await
+            .unwrap_or_else(|e| panic!("fetch {url}: {:?}", e.error));
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.url(), url);
+        let mut body = Vec::new();
+        while let Some(chunk) = response.next_chunk().await.unwrap() {
+            body.extend(chunk);
+        }
+        body
+    }
+
+    /// Waits for the cache's writes, which happen off the test's thread.
+    async fn until(what: &str, done: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            Timer::after(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    async_test! {
+        async fn http_cache_answers_and_revalidates() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let bodies = Arc::new(AtomicUsize::new(0));
+            let server = task::spawn(serve_game_file(listener, requests.clone(), bodies.clone()));
+
+            let dir = tempfile::tempdir().unwrap();
+            let cache = HttpCache::new(dir.path(), 1 << 30).unwrap();
+            let backend = new_test_backend(false).with_http_cache(Some(cache.clone()));
+            let file = format!("http://127.0.0.1:{port}/gamefiles/mon/Frogzard.swf");
+            let count = || requests.lock().unwrap().len();
+
+            // The first request downloads the file, and it is kept.
+            assert_eq!(fetch_chunks(&backend, &format!("{file}?v=5.32")).await, b"hello");
+            until("the entry to be written", || cache.stats().stored == 1).await;
+            assert_eq!((count(), bodies.load(Ordering::Relaxed)), (1, 1));
+
+            // The same URL again: from disk, the server isn't asked. `body()` reads it too.
+            assert_eq!(fetch_chunks(&backend, &format!("{file}?v=5.32")).await, b"hello");
+            let response = backend
+                .fetch(Request::get(format!("{file}?v=5.32")))
+                .await
+                .ok()
+                .unwrap();
+            assert_eq!(response.body().await.unwrap(), b"hello");
+            assert_eq!(count(), 1);
+            assert_eq!(cache.stats().hits, 2);
+
+            // Another query string (the game after an update): the server is asked, says
+            // "not modified", and sends no body.
+            assert_eq!(fetch_chunks(&backend, &format!("{file}?v=5.33")).await, b"hello");
+            assert_eq!((count(), bodies.load(Ordering::Relaxed)), (2, 1));
+            assert_eq!(cache.stats().revalidated, 1);
+            // From then on that query is answered from disk.
+            let key = Url::parse(&format!("{file}?v=5.33")).unwrap();
+            until("the entry to be refreshed", || {
+                cache.lookup(&key).is_some_and(|entry| entry.meta.is_fresh(&key))
+            })
+            .await;
+            assert_eq!(fetch_chunks(&backend, &format!("{file}?v=5.33")).await, b"hello");
+            assert_eq!(count(), 2);
+
+            // A POST, or a request with headers of its own, never touches the cache.
+            let mut with_header = Request::get(format!("{file}?v=5.33"));
+            with_header.set_headers(IndexMap::from([("x-test".to_string(), "1".to_string())]));
+            let response = backend.fetch(with_header).await.ok().unwrap();
+            assert_eq!(response.body().await.unwrap(), b"hello");
+            assert_eq!((count(), bodies.load(Ordering::Relaxed)), (3, 2));
+
+            // The server is gone: a URL that would be revalidated is answered from disk.
+            server.abort();
+            let _ = server.await;
+            assert_eq!(fetch_chunks(&backend, &format!("{file}?v=5.34")).await, b"hello");
+            // Without the cache the same request fails.
+            let plain = new_test_backend(false);
+            assert!(plain.fetch(Request::get(format!("{file}?v=5.34"))).await.is_err());
+        }
     }
 }
