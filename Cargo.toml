@@ -15,6 +15,7 @@ members = [
     "exporter/integration_tests",
 
     "frontend-utils",
+    "http-cache",
 
     "render",
     "render/canvas",
