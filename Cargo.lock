@@ -5030,6 +5030,7 @@ dependencies = [
  "macro_rules_attribute",
  "reqwest",
  "ruffle_core",
+ "ruffle_http_cache",
  "ruffle_render",
  "tempfile",
  "thiserror 2.0.18",
@@ -5061,6 +5062,15 @@ dependencies = [
  "humantime",
  "toml",
  "walkdir",
+]
+
+[[package]]
+name = "ruffle_http_cache"
+version = "0.7.0-nightly.2026.10.2"
+dependencies = [
+ "http",
+ "tracing",
+ "url",
 ]
 
 [[package]]
