@@ -793,7 +793,60 @@ impl<'gc> Avm2<'gc> {
         let stringified = error.to_string(activation);
         tracing::error!("{}: {}", extra_info, stringified);
 
-        // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
+        // Turu: push the error onto `loaderInfo.uncaughtErrorEvents`.
+        Self::dispatch_uncaught_error(activation, &error);
+    }
+
+    /// Turu: Flash Player's `uncaughtError`: dispatched on the `uncaughtErrorEvents` of the
+    /// `LoaderInfo` whose SWF's code made the error (the root's when that's unknown), then on each
+    /// enclosing SWF's, through the `Loader`s that loaded them, until a listener stops its
+    /// propagation. An error in an `uncaughtError` listener isn't dispatched again.
+    fn dispatch_uncaught_error(activation: &mut Activation<'_, 'gc>, error: &Error<'gc>) {
+        thread_local! {
+            static DISPATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        let Some(value) = error.as_avm_error() else {
+            return;
+        };
+        if DISPATCHING.with(|d| d.replace(true)) {
+            return;
+        }
+
+        let mut movie = error
+            .call_stack()
+            .and_then(|stack| stack.innermost())
+            .map(|method| method.translation_unit().movie())
+            .unwrap_or_else(|| activation.context.root_swf.clone());
+        let mc = activation.gc();
+        let loader_infos = activation.avm2().aqw_loader_infos(mc);
+        let class = activation.avm2().classes().uncaughterrorevent;
+        let event_type = AvmString::new_utf8(activation.gc(), "uncaughtError");
+        // A SWF loads another at most a few levels deep; this only guards against a cycle.
+        for _ in 0..16 {
+            let Some(loader_info) = loader_infos
+                .iter()
+                .find(|info| Arc::ptr_eq(info.loader_stream().movie(), &movie))
+                .copied()
+            else {
+                break;
+            };
+            let event = EventObject::from_class_and_args(
+                activation,
+                class,
+                &[event_type.into(), true.into(), true.into(), value],
+            );
+            let target = loader_info.uncaught_error_events();
+            Avm2::dispatch_event(activation.context, event, target);
+            if event.event().is_propagation_stopped() {
+                break;
+            }
+            let Some(loader) = loader_info.loader() else {
+                break;
+            };
+            movie = loader.display_object().movie();
+        }
+
+        DISPATCHING.with(|d| d.set(false));
     }
 }
 

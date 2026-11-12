@@ -74,6 +74,15 @@ impl<'gc> Error<'gc> {
         }
     }
 
+    /// Turu: the call stack taken when the error was made, if it has one.
+    pub fn call_stack(&self) -> Option<&CallStack<'gc>> {
+        match &*self.0 {
+            ErrorData::AvmValue(_, call_stack) => Some(call_stack),
+            ErrorData::AvmError(error) => Some(error.call_stack()),
+            ErrorData::RustError(_) => None,
+        }
+    }
+
     /// Return a stringified representation of the error, including its stack
     /// trace if it has one.
     pub fn to_string(&self, activation: &mut Activation<'_, 'gc>) -> String {

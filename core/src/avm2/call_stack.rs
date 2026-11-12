@@ -43,6 +43,11 @@ impl<'gc> CallStack<'gc> {
         }
     }
 
+    /// Turu: the method running when the stack was taken (where an error was made).
+    pub fn innermost(&self) -> Option<Method<'gc>> {
+        self.stack.last().copied()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.stack.is_empty()
     }
