@@ -32,6 +32,8 @@ pub mod segments;
 pub mod present;
 pub mod render_thread;
 pub mod layer_cache;
+/// Turu: the GPU's time per frame, for the perf log ([`gpu_timing::take`]).
+pub mod gpu_timing;
 mod arena;
 pub mod shape_uploads;
 
