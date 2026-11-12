@@ -30,6 +30,8 @@ type Error = Box<dyn std::error::Error>;
 pub mod utils;
 /// Turu: [`segments::ThreadState`] and [`segments::swap`], for several players on one thread.
 pub mod segments;
+/// Turu: the GPU's time per frame, for the perf log ([`gpu_timing::take`]).
+pub mod gpu_timing;
 mod arena;
 
 mod bitmaps;

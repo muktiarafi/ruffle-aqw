@@ -133,6 +133,8 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
     profiler: GpuProfiler,
+    /// Turu: the GPU's time per frame, with `RUFFLE_GPU_TIMING` (see `gpu_timing`).
+    gpu_timer: Option<crate::gpu_timing::GpuTimer>,
 }
 
 impl<T: RenderTarget> WgpuRenderBackend<T> {
@@ -422,6 +424,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         )?;
         #[cfg(not(feature = "profile-with-tracy"))]
         let profiler = GpuProfiler::new(&descriptors.device, profiler_settings)?;
+        // Turu: `RUFFLE_GPU_TIMING` (see `gpu_timing`).
+        let gpu_timer = crate::gpu_timing::GpuTimer::new(&descriptors);
 
         let uniform_alignment = descriptors.limits.min_uniform_buffer_offset_alignment as u64;
         Ok(Self {
@@ -457,6 +461,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             dynamic_transforms: transforms,
             active_frame,
             profiler,
+            gpu_timer,
         })
     }
 
@@ -1297,6 +1302,17 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             return;
         };
 
+        // Turu: the frame's first GPU timestamp, before any of its commands.
+        if let Some(timer) = &mut self.gpu_timer {
+            let size = self.surface.size();
+            timer.begin_frame(
+                &self.descriptors,
+                &mut self.active_frame.command_encoder,
+                (size.width, size.height),
+                self.surface.sample_count(),
+            );
+        }
+
         // AQW build: see the segment cut at the end of the loop.
         const CAB_ENTRIES_PER_SEGMENT: usize = 8;
         let mut cab_entries = 0usize;
@@ -1417,6 +1433,9 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         }
         self.flush_cache_batch(&mut batch);
         drop(cache_timer);
+        if let Some(timer) = &self.gpu_timer {
+            timer.mark_cache_done(&mut self.active_frame.command_encoder);
+        }
 
         let main_timer =
             crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::MAIN_DRAW);
@@ -1440,12 +1459,18 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             &mut self.texture_pool,
         );
         drop(main_timer);
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.end_frame(&mut self.active_frame.command_encoder);
+        }
         self.profiler
             .resolve_queries(&mut self.active_frame.command_encoder);
         self.active_frame.staging_belt.finish();
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.submitted();
+        }
         // AQW build: this pool (cacheAsBitmap and their filters) used to be thrown away every
         // frame, recreating ~150 textures per frame in crowded AQW rooms. Besides the CPU cost,
         // the graphics driver leaked host memory on that churn (10-90 MB/s). Keep it across
