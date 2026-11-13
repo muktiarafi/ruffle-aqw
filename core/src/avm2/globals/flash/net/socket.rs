@@ -230,6 +230,8 @@ pub fn flush<'gc>(
         let len = buffer.len();
         let data = buffer.drain(..len).collect::<Vec<_>>();
 
+        // Turu: what the movie sends, for the bot.
+        sockets.observe_sent(handle, &data);
         sockets.send(handle, data)
     }
 

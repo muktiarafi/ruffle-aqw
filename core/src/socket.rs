@@ -60,11 +60,29 @@ pub enum SocketAction {
     Close(SocketHandle),
 }
 
+/// Turu: told what each AVM2 `Socket` sends (on `flush`) and receives (after its `socketData`
+/// event was dispatched, so the movie has handled it), and when it closes. `socket` names the
+/// socket for as long as it's open.
+pub trait SocketObserver: Send {
+    fn sent(&self, socket: u64, data: &[u8]);
+    fn received(&self, socket: u64, data: &[u8]);
+    fn closed(&self, socket: u64);
+}
+
+fn observer_id(handle: SocketHandle) -> u64 {
+    use slotmap::Key;
+    handle.data().as_ffi()
+}
+
 /// Manages the collection of Sockets.
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Sockets<'gc> {
     sockets: SlotMap<SocketHandle, Socket<'gc>>,
+
+    /// Turu: see [`SocketObserver`].
+    #[collect(require_static)]
+    observer: Option<Box<dyn SocketObserver>>,
 
     #[collect(require_static)]
     receiver: Receiver<SocketAction>,
@@ -78,8 +96,21 @@ impl<'gc> Sockets<'gc> {
 
         Self {
             sockets: SlotMap::with_key(),
+            observer: None,
             receiver,
             sender,
+        }
+    }
+
+    /// Turu: see [`SocketObserver`].
+    pub fn set_observer(&mut self, observer: Option<Box<dyn SocketObserver>>) {
+        self.observer = observer;
+    }
+
+    /// Turu: what an AVM2 socket's `flush` sends.
+    pub(crate) fn observe_sent(&self, handle: SocketHandle, data: &[u8]) {
+        if let Some(observer) = &self.observer {
+            observer.sent(observer_id(handle), data);
         }
     }
 
@@ -288,6 +319,8 @@ impl<'gc> Sockets<'gc> {
 
                     match target {
                         SocketKind::Avm2(target) => {
+                            // Turu: told once the movie has handled the data.
+                            let observed = context.sockets.observer.is_some().then(|| data.clone());
                             let mut activation = Avm2Activation::from_nothing(context);
 
                             let bytes_loaded = data.len();
@@ -301,6 +334,11 @@ impl<'gc> Sockets<'gc> {
                             );
 
                             Avm2::dispatch_event(activation.context, progress_evt, target.into());
+                            if let (Some(data), Some(observer)) =
+                                (observed, &activation.context.sockets.observer)
+                            {
+                                observer.received(observer_id(handle), &data);
+                            }
                         }
                         SocketKind::Avm1(target) => {
                             let mut activation = Avm1Activation::from_stub(
@@ -354,6 +392,9 @@ impl<'gc> Sockets<'gc> {
                     }
                 }
                 SocketAction::Close(handle) => {
+                    if let Some(observer) = &context.sockets.observer {
+                        observer.closed(observer_id(handle));
+                    }
                     let target = match context.sockets.sockets.remove(handle) {
                         Some(socket) => {
                             socket.connected.set(false);

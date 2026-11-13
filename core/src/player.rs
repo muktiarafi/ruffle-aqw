@@ -3156,6 +3156,14 @@ impl Player {
         });
     }
 
+    /// Turu: see [`crate::socket::SocketObserver`].
+    pub fn set_socket_observer(
+        &mut self,
+        observer: Option<Box<dyn crate::socket::SocketObserver>>,
+    ) {
+        self.mutate_with_update_context(|context| context.sockets.set_observer(observer));
+    }
+
     pub fn call_internal_interface(
         &mut self,
         name: &str,
@@ -3307,6 +3315,8 @@ pub struct PlayerBuilder {
     page_url: Option<String>,
     frame_rate: Option<f64>,
     external_interface_provider: Option<Box<dyn ExternalInterfaceProvider>>,
+    /// Turu: see [`crate::socket::SocketObserver`].
+    socket_observer: Option<Box<dyn crate::socket::SocketObserver>>,
     fs_command_provider: Box<dyn FsCommandProvider>,
     #[cfg(feature = "known_stubs")]
     stub_report_output: Option<std::path::PathBuf>,
@@ -3364,6 +3374,7 @@ impl PlayerBuilder {
             page_url: None,
             frame_rate: None,
             external_interface_provider: None,
+            socket_observer: None,
             fs_command_provider: Box::new(NullFsCommandProvider),
             #[cfg(feature = "known_stubs")]
             stub_report_output: None,
@@ -3571,6 +3582,15 @@ impl PlayerBuilder {
     /// Adds an External Interface provider for movies to communicate with
     pub fn with_external_interface(mut self, provider: Box<dyn ExternalInterfaceProvider>) -> Self {
         self.external_interface_provider = Some(provider);
+        self
+    }
+
+    /// Turu: told what the movie's sockets send and receive ([`crate::socket::SocketObserver`]).
+    pub fn with_socket_observer(
+        mut self,
+        observer: Box<dyn crate::socket::SocketObserver>,
+    ) -> Self {
+        self.socket_observer = Some(observer);
         self
     }
 
@@ -3853,6 +3873,9 @@ impl PlayerBuilder {
             }
         });
         player_lock.audio.set_frame_rate(frame_rate);
+        if let Some(observer) = self.socket_observer {
+            player_lock.set_socket_observer(Some(observer));
+        }
         player_lock.set_letterbox(self.letterbox);
         player_lock.set_quality(self.quality);
         player_lock.set_viewport_dimensions(ViewportDimensions {
