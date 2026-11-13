@@ -110,6 +110,10 @@ pub use swf;
 pub use swf::Color;
 pub use ttf_parser;
 
+/// Turu, for the perf log: the uncaught AS3 errors since the last call, and how many of them
+/// were logged (a repeat is only counted, see `avm2::aqw_errors`).
+pub use avm2::aqw_errors::take as take_error_stats;
+
 /// The newest Flash Player version known to Ruffle.
 pub const NEWEST_PLAYER_VERSION: u8 = 51;
 

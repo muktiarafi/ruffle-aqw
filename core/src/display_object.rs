@@ -3709,7 +3709,12 @@ pub mod settle {
 
     /// Unsettles every display object (called when a frame starts).
     pub fn new_frame() {
-        EPOCH.with(|e| e.set(e.get() + 1));
+        let epoch = EPOCH.with(|e| {
+            e.set(e.get() + 1);
+            e.get()
+        });
+        // Turu: (for `RUFFLE_ERRORS_ONCE_AB`'s turns.)
+        crate::avm2::aqw_errors::new_frame(epoch);
     }
 
     /// `RUFFLE_NO_SETTLE` turns this off, for A/B comparisons.
