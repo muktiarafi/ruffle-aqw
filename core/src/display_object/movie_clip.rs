@@ -2683,7 +2683,18 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         let skip_frame = self.base().should_skip_next_enter_frame();
         // AQW build: nothing below advances or is placed (see `display_object::settle`).
         if !skip_frame && self.is_dormant() {
+            crate::display_object::settle::stats::clip_entered(true, false, false);
             return;
+        }
+        // Turu: counted for the perf log's `gotos:` line (HOST_SWF_PROPOSAL.md M7).
+        if !skip_frame {
+            let playing = self.playing();
+            let only_playing = playing
+                && self.0.queued_tags.borrow().is_empty()
+                && self
+                    .iter_render_list()
+                    .all(crate::display_object::settle::child_is_dormant);
+            crate::display_object::settle::stats::clip_entered(false, playing, only_playing);
         }
         //Child removals from looping gotos appear to resolve in reverse order.
         for child in self.iter_render_list().rev() {

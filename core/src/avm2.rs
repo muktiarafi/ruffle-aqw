@@ -786,12 +786,18 @@ impl<'gc> Avm2<'gc> {
         // time, which is observable.
         if activation.context.player_mode == PlayerMode::Debug {
             let stringified = error.to_string(activation);
-            activation.context.avm_trace(&stringified);
+            if !aqw_errors::repeat(&stringified) {
+                activation.context.avm_trace(&stringified);
+            }
         }
 
         // This will print the properly formatted error
         let stringified = error.to_string(activation);
-        tracing::error!("{}: {}", extra_info, stringified);
+        // Turu: an error seen before (its message and innermost frame) is counted, not logged
+        // again, while `aqw_errors` is on (HOST_SWF_PROPOSAL.md M7).
+        if !aqw_errors::seen(&stringified) {
+            tracing::error!("{}: {}", extra_info, stringified);
+        }
 
         // Turu: push the error onto `loaderInfo.uncaughtErrorEvents`.
         Self::dispatch_uncaught_error(activation, &error);
@@ -857,4 +863,80 @@ pub trait Avm2StrRepresentable: Sized {
         &self,
         context: &impl crate::string::HasStringContext<'gc>,
     ) -> AvmString<'gc>;
+}
+
+/// Turu (HOST_SWF_PROPOSAL.md M7): a game's asset can throw the same error every frame (an
+/// armour's frame script reading a field that isn't there), and each was logged with its stack.
+/// With this on, an uncaught error is logged the first time its message and innermost frame
+/// are seen, and only counted after that; the perf log's `gotos:` line gives the counts.
+/// `RUFFLE_ERRORS_ONCE_AB=<frames>` turns it on and off in turns of that many frames, to measure
+/// it; `RUFFLE_ERRORS_EVERY_TIME` keeps logging every one.
+pub mod aqw_errors {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    thread_local! {
+        static SEEN: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+        static ERRORS: Cell<u64> = const { Cell::new(0) };
+        static LOGGED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    static PAUSED: AtomicBool = AtomicBool::new(false);
+
+    /// Whether repeats are counted instead of logged right now.
+    pub fn active() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("RUFFLE_ERRORS_EVERY_TIME").is_none())
+            && !PAUSED.load(Ordering::Relaxed)
+    }
+
+    /// Called when a frame starts, with its number: the A/B turns.
+    pub fn new_frame(epoch: u64) {
+        static TURN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let turn = *TURN.get_or_init(|| {
+            std::env::var("RUFFLE_ERRORS_ONCE_AB").ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+        });
+        if turn > 0 {
+            PAUSED.store((epoch / turn) % 2 == 1, Ordering::Relaxed);
+        }
+    }
+
+    /// The message and the innermost frame: the first two lines.
+    fn key(stringified: &str) -> String {
+        stringified.lines().take(2).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Whether the error was seen before and needn't be traced (no counting).
+    pub fn repeat(stringified: &str) -> bool {
+        active() && SEEN.with(|seen| seen.borrow().contains(&key(stringified)))
+    }
+
+    /// Counts the error; true when it was seen before and isn't to be logged again.
+    pub fn seen(stringified: &str) -> bool {
+        ERRORS.with(|c| c.set(c.get() + 1));
+        let first = SEEN.with(|seen| {
+            let mut seen = seen.borrow_mut();
+            // A game that throws ever-new errors mustn't grow this without end.
+            if seen.len() >= 10_000 {
+                seen.clear();
+            }
+            seen.insert(key(stringified))
+        });
+        let skip = !first && active();
+        if !skip {
+            LOGGED.with(|c| c.set(c.get() + 1));
+        }
+        skip
+    }
+
+    /// The counts since the last call, for the perf log.
+    pub fn take() -> String {
+        format!(
+            "; uncaught AS3 errors {} (logged {}, repeats counted only: {})",
+            ERRORS.with(|c| c.replace(0)),
+            LOGGED.with(|c| c.replace(0)),
+            if active() { "on" } else { "off" },
+        )
+    }
 }

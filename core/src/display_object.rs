@@ -3661,7 +3661,9 @@ pub mod settle {
 
     /// Unsettles every display object (called when a frame starts).
     pub fn new_frame() {
+        stats::frame();
         let epoch = EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::avm2::aqw_errors::new_frame(epoch);
         if epoch % DORMANT_FRAMES == 0 {
             DORMANT_EPOCH.fetch_add(1, Ordering::Relaxed);
         }
@@ -3871,6 +3873,34 @@ pub mod settle {
             static SCRIPT_WALKED: Cell<u64> = const { Cell::new(0) };
             static BLOCKED_BY_BUTTON: Cell<u64> = const { Cell::new(0) };
             static WOKE_ALL: Cell<u64> = const { Cell::new(0) };
+            static FRAMES: Cell<u64> = const { Cell::new(0) };
+            static CLIPS_DORMANT: Cell<u64> = const { Cell::new(0) };
+            static CLIPS_WALKED: Cell<u64> = const { Cell::new(0) };
+            static CLIPS_PLAYING: Cell<u64> = const { Cell::new(0) };
+            static CLIPS_ONLY_PLAYING: Cell<u64> = const { Cell::new(0) };
+        }
+
+        /// Turu (HOST_SWF_PROPOSAL.md M7): a frame started.
+        pub fn frame() {
+            add(&FRAMES);
+        }
+
+        /// Turu: a movie clip met by a frame's enter-frame walk: skipped as dormant, or walked;
+        /// a walked one may be playing, and may be awake only because it plays (stopped, it
+        /// could sleep: nothing queued, every child dormant). What stopping idle animations
+        /// could save is bounded by that last count.
+        pub fn clip_entered(dormant: bool, playing: bool, only_playing: bool) {
+            if dormant {
+                add(&CLIPS_DORMANT);
+                return;
+            }
+            add(&CLIPS_WALKED);
+            if playing {
+                add(&CLIPS_PLAYING);
+            }
+            if only_playing {
+                add(&CLIPS_ONLY_PLAYING);
+            }
         }
 
         fn add(counter: &'static LocalKey<Cell<u64>>) {
@@ -3934,6 +3964,19 @@ pub mod settle {
                 take(&SCRIPT_WALKED),
                 take(&BLOCKED_BY_BUTTON),
                 take(&WOKE_ALL),
+            ) + &clips_per_frame()
+                + &crate::avm2::aqw_errors::take()
+        }
+
+        fn clips_per_frame() -> String {
+            let take = |counter: &'static LocalKey<Cell<u64>>| counter.with(|c| c.replace(0));
+            let frames = take(&FRAMES).max(1) as f64;
+            format!(
+                "; per frame, clips skipped as dormant {:.0}, walked {:.0} (playing {:.0}, awake only because they play {:.0})",
+                take(&CLIPS_DORMANT) as f64 / frames,
+                take(&CLIPS_WALKED) as f64 / frames,
+                take(&CLIPS_PLAYING) as f64 / frames,
+                take(&CLIPS_ONLY_PLAYING) as f64 / frames,
             )
         }
     }
