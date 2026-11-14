@@ -19,6 +19,9 @@ pub use display_object::interp as frame_interpolation;
 pub use display_object::settle::stats::take as take_goto_stats;
 /// AQW build, for the perf log: whether dormant marks count right now (`RUFFLE_DORMANT_AB`).
 pub use display_object::settle::dormant_active;
+/// Turu: a text field's selection, for Turu's Android build, which keeps the game's focused field
+/// in step with a native text field above the soft keyboard.
+pub use display_object::TextSelection;
 
 /// Turu: the thread-local state that belongs to one player: its queued and running shape
 /// tessellations (`deferred_shapes`), the change count its recorded pictures are checked
