@@ -19,6 +19,9 @@ pub use display_object::graphic::deferred_shapes::set_wait as set_shape_wait;
 pub use display_object::graphic::deferred_shapes::shutdown as shutdown_deferred_shapes;
 /// AQW build: frame interpolation (an option, off by default).
 pub use display_object::interp as frame_interpolation;
+/// Turu: a text field's selection, for Turu's Android build, which keeps the game's focused field
+/// in step with a native text field above the soft keyboard.
+pub use display_object::TextSelection;
 
 #[macro_use]
 extern crate num_derive;
