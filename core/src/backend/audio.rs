@@ -216,9 +216,28 @@ struct NullSound {
     format: swf::SoundFormat,
 }
 
+/// Turu: an event sound "playing" on `NullAudioBackend`: when it started and how long it lasts.
+struct NullInstance {
+    started: web_time::Instant,
+    /// Where each loop starts in the sound, in milliseconds (`SoundInfo::in_sample`).
+    in_ms: f64,
+    /// One loop's length, from the in point to the out point, in milliseconds.
+    loop_ms: f64,
+    /// All loops' length, in milliseconds.
+    length_ms: f64,
+}
+
+impl NullInstance {
+    fn elapsed_ms(&self) -> f64 {
+        self.started.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
 /// Audio backend that ignores all audio.
 pub struct NullAudioBackend {
     sounds: SlotMap<SoundHandle, NullSound>,
+    /// Turu: the event sounds started and not yet over (see `start_sound`).
+    instances: SlotMap<SoundInstanceHandle, NullInstance>,
     volume: f32,
 }
 
@@ -226,6 +245,7 @@ impl NullAudioBackend {
     pub fn new() -> NullAudioBackend {
         NullAudioBackend {
             sounds: SlotMap::with_key(),
+            instances: SlotMap::with_key(),
             volume: 1.0,
         }
     }
@@ -267,12 +287,39 @@ impl AudioBackend for NullAudioBackend {
         }))
     }
 
+    // Turu: upstream gave every sound the null handle and reported it playing forever, so
+    // `AudioManager` never saw one end: it filled its 32 slots for good and refused every later
+    // sound, and no `soundComplete` ever fired. AQW keeps each `SoundChannel` it plays (with its
+    // listener) until that event, so without sound (`--headless`, a client without an audio
+    // device) they piled up, ~5000 an hour on a farm at ~13 kills a minute. Each sound now
+    // "plays" for its length.
     fn start_sound(
         &mut self,
-        _sound: SoundHandle,
-        _sound_info: &swf::SoundInfo,
+        sound: SoundHandle,
+        sound_info: &swf::SoundInfo,
     ) -> Result<SoundInstanceHandle, DecodeError> {
-        Ok(SoundInstanceHandle::null())
+        // As the mixer: in and out points are in 44.1 kHz sample frames whatever the sound's
+        // rate, and each loop plays from the in point to the out point (or the end).
+        let to_ms = |n: u32| f64::from(n) * 1000.0 / 44100.0;
+        let in_ms = sound_info.in_sample.map_or(0.0, to_ms);
+        let end_ms = sound_info.out_sample.map_or_else(
+            || {
+                self.get_sound_duration(sound)
+                    .unwrap_or_default()
+                    .as_millis()
+            },
+            to_ms,
+        );
+        let loop_ms = (end_ms - in_ms).max(0.0);
+        let length_ms = loop_ms * f64::from(sound_info.num_loops.max(1));
+        // Forget the sounds already over (`AudioManager` drops them without `stop_sound`).
+        self.instances.retain(|_, i| i.elapsed_ms() < i.length_ms);
+        Ok(self.instances.insert(NullInstance {
+            started: web_time::Instant::now(),
+            in_ms,
+            loop_ms,
+            length_ms,
+        }))
     }
 
     fn start_stream(
@@ -291,11 +338,30 @@ impl AudioBackend for NullAudioBackend {
         Ok(SoundInstanceHandle::null())
     }
 
-    fn stop_sound(&mut self, _sound: SoundInstanceHandle) {}
+    fn stop_sound(&mut self, sound: SoundInstanceHandle) {
+        self.instances.remove(sound);
+    }
 
-    fn stop_all_sounds(&mut self) {}
-    fn get_sound_position(&self, _instance: SoundInstanceHandle) -> Option<f64> {
-        Some(0.0)
+    fn stop_all_sounds(&mut self) {
+        self.instances.clear();
+    }
+    fn get_sound_position(&self, instance: SoundInstanceHandle) -> Option<f64> {
+        // Turu: streams keep the null handle and play on, as upstream (their clip stops them).
+        if instance.is_null() {
+            return Some(0.0);
+        }
+        // Turu: an event sound plays for its length, then is over (`start_sound`). As the mixer,
+        // the position counts from the start of the sound, so it includes the in point.
+        let playing = self.instances.get(instance)?;
+        let elapsed = playing.elapsed_ms();
+        if elapsed >= playing.length_ms {
+            return None;
+        }
+        Some(if playing.loop_ms > 0.0 {
+            playing.in_ms + elapsed % playing.loop_ms
+        } else {
+            playing.in_ms
+        })
     }
     fn get_sound_duration(&self, sound: SoundHandle) -> Option<FloatDuration> {
         if let Some(sound) = self.sounds.get(sound) {
