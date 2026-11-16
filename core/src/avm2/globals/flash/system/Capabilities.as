@@ -1,6 +1,7 @@
 package flash.system {
     import __ruffle__.stub_getter;
     import __ruffle__.stub_method;
+    import flash.ui.Multitouch;
 
     [Ruffle(Abstract)]
     public final class Capabilities {
@@ -144,8 +145,10 @@ package flash.system {
 
         [API("667")]
         public static function get touchscreenType():String {
-            stub_getter("flash.system.Capabilities", "touchscreenType");
-            return "none";
+            // Turu: "finger" on a touch screen (the frontend's `UiBackend::supports_touch_events`),
+            // as Flash Player on Android. AQW shows its touch controls by default where it is
+            // (its "Mobile Controls" setting on "Auto").
+            return Multitouch.supportsTouchEvents ? TouchscreenType.FINGER : TouchscreenType.NONE;
         }
 
         public native static function get version():String;
