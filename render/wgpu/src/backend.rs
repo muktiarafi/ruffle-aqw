@@ -422,6 +422,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         // AQW build: on DirectX 12, build the render pipelines in the background now.
         descriptors.warm_up(target.format());
 
+        crate::surface::set_stage_edge_mode(StageQuality::Low);
         let surface = Surface::new(
             &descriptors,
             StageQuality::Low,
@@ -1062,6 +1063,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         );
         self.target.resize(&self.descriptors.device, width, height);
 
+        crate::surface::set_stage_edge_mode(self.surface.quality());
         self.surface = Surface::new(
             &self.descriptors,
             self.surface.quality(),
@@ -1126,6 +1128,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         // AQW build: layers made of bitmaps or rectangles only would keep the old edge
         // smoothing for as long as they're on screen (see `crate::layer_cache`).
         self.texture_pool.layer_cache().clear();
+        crate::surface::set_stage_edge_mode(quality);
         self.surface = Surface::new(
             &self.descriptors,
             quality,

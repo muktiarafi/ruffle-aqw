@@ -33,6 +33,16 @@ pub(crate) struct TessellationCache {
     stretch_miss_at: u32,
     /// AQW build: which cache this is (see `made_alike`).
     id: u32,
+    /// Turu: the entries of the edge mode before `mode` (see `check_mode`).
+    parked: Option<Box<Parked>>,
+}
+
+/// Turu: a tessellation cache's entries for another edge mode than the current one.
+#[derive(Clone, Debug)]
+struct Parked {
+    mode: EdgeMode,
+    entries: [Option<(Measure, ShapeHandle, u32)>; RETESSELLATION_CACHE_SIZE],
+    len: usize,
 }
 
 /// AQW build, for lean render's check only (`RUFFLE_LEAN_RENDER_VERIFY`): which cache (a
@@ -336,6 +346,7 @@ impl TessellationCache {
             mode: edge_mode(),
             stretch_misses: 0,
             stretch_miss_at: u32::MAX,
+            parked: None,
             id: NEXT_ID.with(|next| {
                 let id = next.get();
                 next.set(id.wrapping_add(1));
@@ -362,11 +373,27 @@ impl TessellationCache {
 
     /// AQW build: drops the entries when the edge mode has changed (the stage quality, with
     /// Flash-style edges).
+    ///
+    /// Turu: keeps them aside instead, and takes back those of the new mode if they're the ones
+    /// kept aside. AQW's automatic quality switches between Medium and Low every few seconds on
+    /// a slow phone (Low makes the game fast enough, so it goes back to Medium), and each switch
+    /// tessellated every shape on screen again (about a thousand in Battleon); the shapes not
+    /// ready in time were left out of that picture, so the skill bar and the Game Menu
+    /// flickered. With two modes' tessellations kept, only the first switch each way costs. (The
+    /// kept ones are freed as the others when not drawn for a while: `evict_older_than`.)
     fn check_mode(&mut self) {
         let mode = edge_mode();
         if self.mode != mode {
-            self.entries = std::array::from_fn(|_| None);
-            self.len = 0;
+            let current = Parked {
+                mode: self.mode,
+                entries: std::mem::replace(&mut self.entries, std::array::from_fn(|_| None)),
+                len: std::mem::take(&mut self.len),
+            };
+            if let Some(parked) = self.parked.take().filter(|parked| parked.mode == mode) {
+                self.entries = parked.entries;
+                self.len = parked.len;
+            }
+            self.parked = (current.len > 0).then(|| Box::new(current));
             self.mode = mode;
         }
     }
@@ -383,8 +410,26 @@ impl TessellationCache {
                 kept += 1;
             }
         }
-        let evicted = self.len - kept;
+        let mut evicted = self.len - kept;
         self.len = kept;
+        // Turu: the other mode's too.
+        if let Some(parked) = &mut self.parked {
+            let mut kept = 0;
+            for i in 0..parked.len {
+                let entry = parked.entries[i].take();
+                if let Some(entry) = entry
+                    && entry.2 >= cutoff
+                {
+                    parked.entries[kept] = Some(entry);
+                    kept += 1;
+                }
+            }
+            evicted += parked.len - kept;
+            parked.len = kept;
+            if kept == 0 {
+                self.parked = None;
+            }
+        }
         evicted
     }
 
@@ -491,11 +536,37 @@ impl TessellationCache {
     /// scale and position; with `None` the entry is removed. Used to fill in a deferred
     /// tessellation (see `graphic::deferred_shapes`).
     pub(crate) fn replace(&mut self, old: &ShapeHandle, new: Option<ShapeHandle>) {
-        let Some(index) = self.entries[..self.len].iter().position(|entry| {
+        let holds_old = |entry: &Option<(Measure, ShapeHandle, u32)>| {
             entry
                 .as_ref()
                 .is_some_and(|(_, handle, _)| std::sync::Arc::ptr_eq(&handle.0, &old.0))
-        }) else {
+        };
+        // Turu: a tessellation started before the edge mode changed is with the other mode's
+        // (`check_mode`).
+        if !self.entries[..self.len].iter().any(holds_old)
+            && let Some(parked) = &mut self.parked
+            && let Some(index) = parked.entries[..parked.len].iter().position(holds_old)
+        {
+            match new {
+                Some(new) => {
+                    if made_for::on() {
+                        made_for::pass_on(old, &new);
+                    }
+                    if let Some((_, handle, _)) = &mut parked.entries[index] {
+                        *handle = new;
+                    }
+                }
+                None => {
+                    for i in index + 1..parked.len {
+                        parked.entries[i - 1] = parked.entries[i].take();
+                    }
+                    parked.entries[parked.len - 1] = None;
+                    parked.len -= 1;
+                }
+            }
+            return;
+        }
+        let Some(index) = self.entries[..self.len].iter().position(holds_old) else {
             return;
         };
         match new {

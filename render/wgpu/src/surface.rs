@@ -36,6 +36,38 @@ pub struct Surface {
     format: wgpu::TextureFormat,
 }
 
+/// AQW build: the soft edges shapes are tessellated with, from the stage's quality. Turu: only
+/// the stage's surface sets it (`WgpuRenderBackend`'s own, made at start, on a resize and on a
+/// quality change), not every surface: the mode is one for the whole process, and each
+/// tessellation cache puts aside what it holds when the mode changes (`TessellationCache`).
+/// When an offscreen draw (`BitmapData.draw` at another quality than the stage's, which AQW
+/// does every few seconds) set it, the next frame re-tessellated every shape on screen, about a
+/// thousand in Battleon, and did so again when the stage's mode came back; on a phone the
+/// shapes not ready in time were left out of those frames, so the skill bar and the Game Menu
+/// flickered. Offscreen draws now take the stage's edges.
+pub fn set_stage_edge_mode(quality: StageQuality) {
+    let flash_aa = ruffle_render::tessellator::flash_aa_switch();
+    // (Logged when it changes.)
+    {
+        static LAST: std::sync::Mutex<Option<(bool, StageQuality)>> = std::sync::Mutex::new(None);
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if *last != Some((flash_aa, quality)) {
+            *last = Some((flash_aa, quality));
+            tracing::info!(
+                target: "ruffle_aqw_perf",
+                "Edge smoothing: {} ({quality:?} quality)",
+                if flash_aa { "Flash-style" } else { "MSAA" }
+            );
+        }
+    }
+    ruffle_render::tessellator::set_edge_mode(match quality {
+        _ if !flash_aa => ruffle_render::tessellator::EdgeMode::Off,
+        StageQuality::Low => ruffle_render::tessellator::EdgeMode::Lines,
+        StageQuality::Medium => ruffle_render::tessellator::EdgeMode::Outlines,
+        _ => ruffle_render::tessellator::EdgeMode::Soft,
+    });
+}
+
 impl Surface {
     pub fn new(
         descriptors: &Descriptors,
@@ -54,24 +86,6 @@ impl Surface {
         // Medium, with fewer triangles, and up; shapes are tessellated again for the new
         // quality), so nothing is drawn with MSAA.
         let flash_aa = ruffle_render::tessellator::flash_aa_switch();
-        // (Logged when it changes: offscreen drawing makes surfaces all the time.)
-        {
-            static LAST: std::sync::Mutex<Option<(bool, StageQuality)>> = std::sync::Mutex::new(None);
-            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-            if *last != Some((flash_aa, quality)) {
-                *last = Some((flash_aa, quality));
-                tracing::info!(
-                    "Edge smoothing: {} ({quality:?} quality)",
-                    if flash_aa { "Flash-style" } else { "MSAA" }
-                );
-            }
-        }
-        ruffle_render::tessellator::set_edge_mode(match quality {
-            _ if !flash_aa => ruffle_render::tessellator::EdgeMode::Off,
-            StageQuality::Low => ruffle_render::tessellator::EdgeMode::Lines,
-            StageQuality::Medium => ruffle_render::tessellator::EdgeMode::Outlines,
-            _ => ruffle_render::tessellator::EdgeMode::Soft,
-        });
         let sample_count = supported_sample_count(
             &descriptors.adapter,
             if flash_aa {
