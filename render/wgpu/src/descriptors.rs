@@ -17,6 +17,9 @@ pub struct Descriptors {
     pub device: wgpu::Device,
     pub limits: wgpu::Limits,
     pub backend: Backend,
+    /// Turu: whether draws can start at a vertex offset (`base_vertex`). OpenGL ES 3.0 and 3.1
+    /// lack `glDrawElementsInstancedBaseVertex`; the shape arena's shared buffers need it.
+    pub base_vertex: bool,
     pub queue: wgpu::Queue,
     pub bitmap_samplers: BitmapSamplers,
     pub bind_layouts: BindLayouts,
@@ -50,6 +53,13 @@ impl Descriptors {
         let quad = Quad::new(&device);
         let filters = Filters::new(&device);
         let backend = adapter.get_info().backend;
+        // Turu: `RUFFLE_NO_BASE_VERTEX=1` forces the per-shape-slice path, to test without it.
+        let base_vertex = std::env::var_os("RUFFLE_NO_BASE_VERTEX").is_none()
+            && adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::BASE_VERTEX);
+        tracing::info!("base_vertex draws: {base_vertex} ({backend:?})");
 
         Self {
             wgpu_instance: instance,
@@ -57,6 +67,7 @@ impl Descriptors {
             device,
             limits,
             backend,
+            base_vertex,
             queue,
             bitmap_samplers,
             bind_layouts,

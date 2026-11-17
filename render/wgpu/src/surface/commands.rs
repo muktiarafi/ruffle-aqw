@@ -473,7 +473,9 @@ impl<'encoder> CommandRenderer<'encoder> {
             let index_size = draw.index_format.byte_size() as wgpu::BufferAddress;
             let base_vertex = draw.vertices.start / stride;
             let first_index = draw.indices.start / index_size;
-            if draw.vertices.start % stride == 0
+            // Turu: not on a driver without `base_vertex` (OpenGL ES 3.0 and 3.1).
+            if self.descriptors.base_vertex
+                && draw.vertices.start % stride == 0
                 && draw.indices.start % index_size == 0
                 && base_vertex <= i32::MAX as u64
                 && first_index + u64::from(num_indices) <= u32::MAX as u64
