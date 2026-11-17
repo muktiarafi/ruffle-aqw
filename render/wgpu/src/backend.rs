@@ -92,8 +92,22 @@ pub fn adapter_memory(adapter: &wgpu::Adapter) -> Option<(u64, u64)> {
     unsafe {
         #[cfg(target_os = "linux")]
         {
+            // Turu: OpenGL too (GL G3: `GL_NVX_gpu_memory_info`, `GL_ATI_meminfo`).
             return adapter
                 .as_hal::<wgpu::hal::api::Vulkan>()
+                .and_then(|adapter| adapter.memory_budget())
+                .or_else(|| {
+                    adapter
+                        .as_hal::<wgpu::hal::api::Gles>()
+                        .and_then(|adapter| adapter.memory_budget())
+                });
+        }
+        // Turu: OpenGL ES has no extension for this, so on a phone this is None for now (an
+        // open question of docs/GL_RENDERER_PROPOSAL.md in Turu, G3).
+        #[cfg(target_os = "android")]
+        {
+            return adapter
+                .as_hal::<wgpu::hal::api::Gles>()
                 .and_then(|adapter| adapter.memory_budget());
         }
         #[cfg(target_os = "macos")]

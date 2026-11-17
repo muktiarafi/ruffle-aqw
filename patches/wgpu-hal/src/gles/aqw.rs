@@ -1043,3 +1043,66 @@ pub(super) fn note_lock() {
 pub(super) fn submitted(counts: &Counts, time: std::time::Duration) {
     totals::submitted(counts, time);
 }
+
+/// G3: how the driver tells its free video memory, if it does.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum MemoryInfo {
+    None,
+    /// `GL_NVX_gpu_memory_info` (NVIDIA): the total and the currently available, in KB.
+    Nvx,
+    /// `GL_ATI_meminfo` (AMD): only the free texture memory, in KB. The budget is taken as
+    /// what was free when the adapter was made, and the usage as how much less is free now.
+    Ati {
+        free_at_start_kb: u64,
+    },
+}
+
+const GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX: u32 = 0x9048;
+const GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX: u32 = 0x9049;
+const TEXTURE_FREE_MEMORY_ATI: u32 = 0x87FC;
+
+impl MemoryInfo {
+    pub unsafe fn new(gl: &glow::Context, has: impl Fn(&str) -> bool) -> Self {
+        if has("GL_NVX_gpu_memory_info") {
+            Self::Nvx
+        } else if has("GL_ATI_meminfo") {
+            match unsafe { Self::ati_free_kb(gl) } {
+                Some(free_at_start_kb) => Self::Ati { free_at_start_kb },
+                None => Self::None,
+            }
+        } else {
+            Self::None
+        }
+    }
+
+    unsafe fn ati_free_kb(gl: &glow::Context) -> Option<u64> {
+        let mut values = [0i32; 4];
+        unsafe { gl.get_parameter_i32_slice(TEXTURE_FREE_MEMORY_ATI, &mut values) };
+        (values[0] > 0).then_some(values[0] as u64)
+    }
+
+    /// (Budget, usage) in bytes.
+    pub unsafe fn budget(&self, gl: &glow::Context) -> Option<(u64, u64)> {
+        const KB: u64 = 1024;
+        match *self {
+            Self::None => None,
+            Self::Nvx => {
+                let total =
+                    unsafe { gl.get_parameter_i32(GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX) };
+                let available =
+                    unsafe { gl.get_parameter_i32(GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX) };
+                (total > 0).then(|| {
+                    let (total, available) = (total as u64, available.max(0) as u64);
+                    (total * KB, total.saturating_sub(available) * KB)
+                })
+            }
+            Self::Ati { free_at_start_kb } => {
+                let free = unsafe { Self::ati_free_kb(gl) }?;
+                Some((
+                    free_at_start_kb * KB,
+                    free_at_start_kb.saturating_sub(free) * KB,
+                ))
+            }
+        }
+    }
+}

@@ -14,6 +14,15 @@ const GL_UNMASKED_VENDOR_WEBGL: u32 = 0x9245;
 const GL_UNMASKED_RENDERER_WEBGL: u32 = 0x9246;
 
 impl super::Adapter {
+    /// AQW build (Turu, GL G3): the video memory budget and usage in bytes, as Mugetsu's
+    /// `memory_budget` for Metal and Vulkan, where the driver tells it
+    /// (`GL_NVX_gpu_memory_info`, `GL_ATI_meminfo`); `None` elsewhere (OpenGL ES has no such
+    /// extension).
+    pub fn memory_budget(&self) -> Option<(u64, u64)> {
+        let gl = self.shared.context.lock();
+        unsafe { self.shared.aqw_memory.budget(&gl) }
+    }
+
     pub fn get_glsl_version(&self) -> naga::back::glsl::Version {
         self.shared.shading_language_version
     }
@@ -942,6 +951,8 @@ impl super::Adapter {
         // ( on Wasm the gl handle is just a ref so we tell clippy to allow
         // dropping the ref )
         #[cfg_attr(target_arch = "wasm32", allow(dropping_references))]
+        // AQW build (Turu, GL G3).
+        let aqw_memory = unsafe { super::aqw::MemoryInfo::new(&gl, |e| extensions.contains(e)) };
         drop(gl);
 
         Some(crate::ExposedAdapter {
@@ -958,6 +969,7 @@ impl super::Adapter {
                     program_cache: Default::default(),
                     es: es_ver.is_some(),
                     max_msaa_samples: max_samples,
+                    aqw_memory,
                 }),
             },
             info: Self::make_info(vendor, renderer, version),

@@ -303,6 +303,9 @@ struct AdapterShared {
     /// Cached here so it doesn't need to be queried every time texture format capabilities are requested.
     /// (this has been shown to be a significant enough overhead)
     max_msaa_samples: i32,
+
+    /// AQW build (Turu, GL G3): how this driver tells its free video memory, if it does.
+    aqw_memory: aqw::MemoryInfo,
 }
 
 impl fmt::Debug for AdapterShared {
@@ -319,6 +322,7 @@ impl fmt::Debug for AdapterShared {
             program_cache: _,
             es,
             max_msaa_samples,
+            aqw_memory,
         } = self;
         f.debug_struct("AdapterShared")
             .field("private_caps", private_caps)
@@ -330,6 +334,7 @@ impl fmt::Debug for AdapterShared {
             .field("next_shader_id", next_shader_id)
             .field("es", es)
             .field("max_msaa_samples", max_msaa_samples)
+            .field("aqw_memory", aqw_memory)
             .finish_non_exhaustive()
     }
 }
