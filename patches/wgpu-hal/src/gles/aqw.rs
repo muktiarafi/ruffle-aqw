@@ -467,17 +467,18 @@ impl Replay {
             #[allow(unreachable_patterns)]
             _ => None,
         };
-        if !self.levers.fbo {
-            self.count(Kind::Fbo, 1);
-            return true;
-        }
-        let (Some(attached), Some(wanted)) = (attached, self.fb.wanted.as_mut()) else {
-            // (Something it doesn't model: an external framebuffer binds a framebuffer of
-            // its own.)
+        let Some(attached) = attached else {
+            // (Something it doesn't model: an external framebuffer binds a framebuffer of its
+            // own, whatever the levers.)
             self.count(Kind::Fbo, 1);
             self.fb.attached = [None; POINTS];
             self.fb.wanted = None;
             self.forget();
+            return true;
+        };
+        let (true, Some(wanted)) = (self.levers.fbo, self.fb.wanted.as_mut()) else {
+            self.count(Kind::Fbo, 1);
+            self.fb.attached = [None; POINTS];
             return true;
         };
         let points = points(attachment);
@@ -789,6 +790,21 @@ impl Replay {
         }
     }
 
+    /// Before `glVertexAttribPointer` or `glVertexAttribFormat` and `glVertexAttribBinding` of
+    /// `location`: since OpenGL ES 3.1 these also set which vertex buffer binding the
+    /// attribute reads (the pointer: binding `location`, with the buffer, stride and offset),
+    /// so what's known of that binding goes. `elsewhere`: bound to a binding of another index
+    /// (`glVertexAttribBinding`), so its `glVertexAttribDivisor` no longer holds either.
+    pub fn attrib_layout_changed(&mut self, location: u32, elsewhere: bool) {
+        *at(&mut self.s.vertex_buffers, location) = None;
+        *at(&mut self.s.binding_divisor, location) = None;
+        if elsewhere {
+            *at(&mut self.s.attrib_divisor, location) = None;
+        }
+    }
+
+    /// `glVertexAttribDivisor`, which since OpenGL ES 3.1 is `glVertexAttribBinding(i, i)` and
+    /// `glVertexBindingDivisor(i, divisor)`.
     pub unsafe fn attrib_divisor(&mut self, gl: &glow::Context, location: u32, divisor: u32) {
         let skipped = same(
             self.levers.state,
@@ -796,6 +812,7 @@ impl Replay {
             divisor,
         );
         if !self.skip(Kind::Vertex, skipped) {
+            *at(&mut self.s.binding_divisor, location) = None;
             unsafe { gl.vertex_attrib_divisor(location, divisor) };
         }
     }
@@ -807,6 +824,8 @@ impl Replay {
             divisor,
         );
         if !self.skip(Kind::Vertex, skipped) {
+            // (Which attributes read this binding isn't tracked.)
+            self.s.attrib_divisor.clear();
             unsafe { gl.vertex_binding_divisor(index, divisor) };
         }
     }

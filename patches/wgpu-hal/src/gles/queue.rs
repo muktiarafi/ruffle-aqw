@@ -1357,6 +1357,7 @@ impl super::Queue {
                 unsafe { rs.bind_array_buffer(gl, buffer) };
                 unsafe { rs.enable_attrib(gl, vat.location) };
                 rs.count(Kind::Vertex, 1);
+                rs.attrib_layout_changed(vat.location, buffer.is_none());
 
                 if buffer.is_none() {
                     rs.count(Kind::Vertex, 1);
