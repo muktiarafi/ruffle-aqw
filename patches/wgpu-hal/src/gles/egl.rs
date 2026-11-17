@@ -322,6 +322,9 @@ impl AdapterContext {
             .try_lock_for(Duration::from_secs(CONTEXT_LOCK_TIMEOUT_SECS))
             .expect("Could not lock adapter context. This is most-likely a deadlock.");
 
+        // AQW build: counted for `RUFFLE_GL_STATS` (each lock makes the context current and
+        // releases it again, which flushes it).
+        super::aqw::note_lock();
         let egl = self.egl.as_ref().map(|egl| {
             egl.make_current();
             EglContextLock {

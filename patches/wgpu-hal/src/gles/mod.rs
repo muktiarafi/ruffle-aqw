@@ -90,6 +90,8 @@ mod web;
 mod wgl;
 
 mod adapter;
+// AQW build: the replay's counts and its shadow of GL state (Turu, docs/GL_RENDERER_PROPOSAL.md).
+mod aqw;
 mod command;
 mod conv;
 mod device;
