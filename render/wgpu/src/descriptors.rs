@@ -39,7 +39,30 @@ impl Debug for Descriptors {
     }
 }
 
+/// Turu: the API version, the downlevel flags and the limits the renderer depends on, for logs
+/// and bug reports (a driver that misdraws says nothing, so a report has to say what it was).
+pub fn device_summary(adapter: &wgpu::Adapter, limits: &wgpu::Limits, base_vertex: bool) -> String {
+    let info = adapter.get_info();
+    let downlevel = adapter.get_downlevel_capabilities();
+    format!(
+        "Device: {:?} {} ({}); base_vertex draws: {base_vertex}; downlevel {:?}; limits: uniform binding {} B ({} transforms per draw), texture 2D {}, color attachments {}",
+        info.backend,
+        info.driver_info,
+        info.name,
+        downlevel.flags,
+        limits.max_uniform_buffer_binding_size,
+        crate::dynamic_transforms::transforms_per_draw(limits),
+        limits.max_texture_dimension_2d,
+        limits.max_color_attachments,
+    )
+}
+
 impl Descriptors {
+    /// Turu: [`device_summary`] of this device.
+    pub fn device_summary(&self) -> String {
+        device_summary(&self.adapter, &self.limits, self.base_vertex)
+    }
+
     pub fn new(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
@@ -59,7 +82,13 @@ impl Descriptors {
                 .get_downlevel_capabilities()
                 .flags
                 .contains(wgpu::DownlevelFlags::BASE_VERTEX);
-        tracing::info!("base_vertex draws: {base_vertex} ({backend:?})");
+        // Turu: what the device is, in one line (on `ruffle_aqw_perf`, which the Android app's
+        // log filter lets through at info; this crate's own target it holds at warn).
+        tracing::info!(
+            target: "ruffle_aqw_perf",
+            "{}",
+            device_summary(&adapter, &limits, base_vertex)
+        );
 
         Self {
             wgpu_instance: instance,
