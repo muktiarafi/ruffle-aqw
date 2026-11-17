@@ -10,6 +10,16 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use vfs::VfsPath;
 
+thread_local! {
+    /// AQW build: the running test's name, for `RUFFLE_TEST_DUMP_DIR`.
+    static DUMP_KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// AQW build: names this thread's dumped images after `test_name`.
+pub fn set_dump_key(test_name: &str) {
+    DUMP_KEY.with_borrow_mut(|key| *key = test_name.to_string());
+}
+
 pub fn capture_and_compare_image(
     base_path: &VfsPath,
     player: &Arc<Mutex<Player>>,
@@ -26,6 +36,18 @@ pub fn capture_and_compare_image(
         player_lock.render();
         render_interface.capture(player_lock.renderer_mut())
     };
+
+    // AQW build: `RUFFLE_TEST_DUMP_DIR` saves every captured image there (raw RGBA, named after
+    // the test), to compare two renderer variants exactly.
+    if let Some(dir) = std::env::var_os("RUFFLE_TEST_DUMP_DIR") {
+        let file = format!("{}__{name}.rgba", DUMP_KEY.with_borrow(|key| key.clone()))
+            .replace(['/', '\\', ':'], "_");
+        let mut bytes = Vec::with_capacity(actual_image.as_raw().len() + 8);
+        bytes.extend_from_slice(&actual_image.width().to_le_bytes());
+        bytes.extend_from_slice(&actual_image.height().to_le_bytes());
+        bytes.extend_from_slice(actual_image.as_raw());
+        let _ = std::fs::write(std::path::Path::new(&dir).join(file), bytes);
+    }
 
     let expected_image = {
         let filename = format!("{name}.expected.png");

@@ -196,6 +196,8 @@ impl MenuBar {
                         ui.close();
                     }
                 });
+                // AQW build: Mugetsu's settings.
+                super::mugetsu_menu::menu_button(ui, &self.event_loop);
             });
         });
     }

@@ -31,6 +31,12 @@ impl<'gc> SwfMovie<'gc> {
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         std::ptr::eq(this.as_ptr(), other.as_ptr())
     }
+
+    /// AQW build: whether nothing reached this movie in the marking that has just finished
+    /// (see `Library::finalize_movie_libraries` in the core).
+    pub fn is_dead(self, fc: &gc_arena::Finalization<'gc>) -> bool {
+        Gc::is_dead(fc, self.0)
+    }
 }
 
 impl<'gc> Deref for SwfMovie<'gc> {

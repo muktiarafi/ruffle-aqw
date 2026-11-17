@@ -1704,6 +1704,16 @@ impl<'gc> MovieLoader<'gc> {
 
         let movie = match sniffed_type {
             ContentType::Swf => {
+                // AQW build: every SWF loaded, once per URL, for the offline load benchmark's
+                // file list (see `aqw_bench`): the game's files are logged by name otherwise
+                // only now and then.
+                thread_local! {
+                    static LOGGED: std::cell::RefCell<fnv::FnvHashSet<String>> =
+                        std::cell::RefCell::new(Default::default());
+                }
+                if LOGGED.with_borrow_mut(|logged| logged.insert(url.clone())) {
+                    tracing::info!(target: "ruffle_aqw_perf", "loaded SWF: {url}");
+                }
                 let mut movie = SwfMovieData::from_data(
                     data,
                     url.clone(),
@@ -2116,6 +2126,8 @@ impl<'gc> MovieLoader<'gc> {
             // frame behind objects placed by the timeline (even if they were
             // both placed in the same frame to begin with).
             mc.base().set_skip_next_enter_frame(true);
+            // AQW build: `enter_frame` has to come by again (see `display_object::settle`).
+            mc.wake();
 
             let movie = movie.unwrap();
             let flashvars = movie.parameters();

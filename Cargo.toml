@@ -207,3 +207,12 @@ lto = "off"
 incremental = true
 # Right between the defaults of 16 and 256, for crate fragment caching.
 codegen-units = 64
+
+# AQW build: wgpu-core with O(used) usage-scope reset (see patches/wgpu-core/src/track/metadata.rs).
+[patch.crates-io]
+wgpu-core = { path = "patches/wgpu-core" }
+wgpu-hal = { path = "patches/wgpu-hal" }
+gc-arena = { path = "patches/gc-arena" }
+# AQW build: a `Positive` fill rule for Flash-style edges (see render/src/tessellator.rs).
+lyon_path = { path = "patches/lyon_path" }
+lyon_algorithms = { path = "patches/lyon_algorithms" }

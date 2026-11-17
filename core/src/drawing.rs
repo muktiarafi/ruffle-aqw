@@ -5,12 +5,18 @@ use ruffle_render::commands::CommandHandler;
 use ruffle_render::shape_utils::{
     DistilledShape, DrawCommand, DrawPath, FillRule, cubic_curve_bounds, quadratic_curve_bounds,
 };
-use std::cell::OnceCell;
+use crate::tessellation_cache::TessellationCache;
+use ruffle_render::tessellator::{EdgeMode, edge_mode};
+use std::cell::RefCell;
+use std::rc::Rc;
 use swf::{FillStyle, LineStyle, Point, Rectangle, Twips};
 
 #[derive(Clone, Debug)]
 pub struct Drawing {
-    render_handle: OnceCell<ShapeHandle>,
+    /// (AQW build: with the edge mode it was tessellated for.)
+    render_handle: RefCell<Option<(EdgeMode, ShapeHandle)>>,
+    /// AQW build: tessellations at the sizes it's drawn, with Flash-style edges (see `render`).
+    scaled: RefCell<Option<Rc<RefCell<TessellationCache>>>>,
     shape_bounds: Rectangle<Twips>,
     edge_bounds: Rectangle<Twips>,
     paths: Vec<DrawingPath>,
@@ -34,7 +40,8 @@ impl Default for Drawing {
 impl Drawing {
     pub fn new() -> Self {
         Self {
-            render_handle: OnceCell::new(),
+            render_handle: RefCell::new(None),
+            scaled: RefCell::new(None),
             shape_bounds: Default::default(),
             edge_bounds: Default::default(),
             paths: Vec::new(),
@@ -51,7 +58,8 @@ impl Drawing {
 
     pub fn from_swf_shape(shape: &swf::Shape) -> Self {
         let mut this = Self {
-            render_handle: OnceCell::new(),
+            render_handle: RefCell::new(None),
+            scaled: RefCell::new(None),
             shape_bounds: shape.shape_bounds,
             edge_bounds: shape.edge_bounds,
             paths: Vec::new(),
@@ -107,6 +115,7 @@ impl Drawing {
     fn mark_dirty(&mut self) {
         self.is_empty = false;
         self.render_handle.take();
+        self.scaled.take();
     }
 
     /// Set fill style and reset fill rule to default.
@@ -163,6 +172,7 @@ impl Drawing {
 
         // An empty drawing doesn't need to hold onto a `ShapeHandle`.
         self.render_handle.take();
+        self.scaled.take();
     }
 
     pub fn set_line_style(&mut self, style: Option<LineStyle>) {
@@ -245,7 +255,43 @@ impl Drawing {
             return None;
         }
 
-        let handle = self.render_handle.get_or_init(|| {
+        let mode = edge_mode();
+        if let Some((made_for, handle)) = &*self.render_handle.borrow()
+            && *made_for == mode
+        {
+            return Some(handle.clone());
+        }
+        let handle = renderer.register_shape(self.distilled(), self);
+        *self.render_handle.borrow_mut() = Some((mode, handle.clone()));
+        Some(handle)
+    }
+
+    /// AQW build: the tessellation for drawing at about `scale` (see `render`).
+    fn scaled_handle(
+        &self,
+        renderer: &mut dyn RenderBackend,
+        mut scale: crate::tessellation_cache::Measure,
+    ) -> Option<ShapeHandle> {
+        if self.is_empty {
+            return None;
+        }
+        let cache = self
+            .scaled
+            .borrow_mut()
+            .get_or_insert_with(TessellationCache::new_shared)
+            .clone();
+        let mut cache = cache.borrow_mut();
+        if let Some(handle) = cache.find_near_and_touch(&mut scale) {
+            return Some(handle);
+        }
+        let handle =
+            renderer.register_shape_stretched(self.distilled(), self, scale.scale, scale.stretch);
+        cache.insert(scale, handle.clone());
+        Some(handle)
+    }
+
+    fn distilled(&self) -> DistilledShape<'_> {
+        {
             let mut paths = Vec::with_capacity(self.paths.len());
 
             for path in &self.paths {
@@ -305,19 +351,28 @@ impl Drawing {
                 })
             }
 
-            let shape = DistilledShape {
+            DistilledShape {
                 paths,
                 shape_bounds: self.shape_bounds,
                 edge_bounds: self.edge_bounds,
                 id: 0,
-            };
-            renderer.register_shape(shape, self)
-        });
-
-        Some(handle.clone())
+            }
+        }
     }
 
     pub fn render(&self, context: &mut RenderContext) {
+        // AQW build: with Flash-style edges, a drawing is tessellated at the size it's drawn
+        // (like a `Graphic`), so its soft edges are half a pixel wide on screen. Device-font
+        // glyphs are drawings in font units (~100x the screen size): tessellated at scale 1,
+        // their edges were ~1/100 of a pixel (aliased, bold-looking text).
+        if ruffle_render::tessellator::edge_aa() {
+            let transform = context.transform_stack.transform();
+            let scale = crate::tessellation_cache::Measure::of(&transform.matrix);
+            if let Some(handle) = self.scaled_handle(context.renderer, scale) {
+                context.commands.render_shape(handle, transform);
+            }
+            return;
+        }
         if let Some(handle) = self.register_or_replace(context.renderer) {
             context
                 .commands

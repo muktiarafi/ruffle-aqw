@@ -456,6 +456,72 @@ pub trait TInteractiveObject<'gc>:
                     rollout_target = tgt.parent();
                 }
 
+                // AQW build: if this object was removed while hovered, the walk above stops at
+                // it, so its former ancestors never heard that the mouse left. AQW swaps a
+                // drop-list row's background on hover (removing the hovered one); with a fast
+                // sweep its row then never got `mouseOut`/`rollOut` and its accept/decline
+                // buttons stayed up. Send them along the ancestors it had when it was hovered.
+                let this = self.as_displayobject();
+                if this.parent().is_none() && this.as_stage().is_none() {
+                    let chain = activation.context.mouse_data.aqw_rollout_chain.clone();
+                    if chain.first().is_some_and(|first| DisplayObject::ptr_eq(*first, this)) {
+                        let mut to_chain = Vec::new();
+                        let mut node = Some(
+                            to.map(|t| t.as_displayobject())
+                                .unwrap_or_else(|| activation.context.stage.into()),
+                        );
+                        while let Some(object) = node {
+                            to_chain.push(object);
+                            node = object.parent();
+                        }
+                        let former: Vec<DisplayObject<'gc>> = chain[1..]
+                            .iter()
+                            .copied()
+                            .take_while(|object| {
+                                !to_chain.iter().any(|t| DisplayObject::ptr_eq(*t, *object))
+                            })
+                            .collect();
+
+                        // `mouseOut` bubbles, as if from the deepest former ancestor.
+                        if let Some(avm2_target) = former.first().and_then(|o| o.object2()) {
+                            let avm2_event = Avm2EventObject::mouse_event(
+                                &mut activation,
+                                string_mouse_out,
+                                former[0],
+                                to,
+                                0,
+                                true,
+                                MouseButton::Left,
+                            );
+                            handled = Avm2::dispatch_event(
+                                activation.context,
+                                avm2_event,
+                                avm2_target.into(),
+                            ) || handled;
+                        }
+                        for tgt in former {
+                            let Some(avm2_target) = tgt.object2() else {
+                                continue;
+                            };
+                            let string_roll_out = istr!("rollOut");
+                            let avm2_event = Avm2EventObject::mouse_event(
+                                &mut activation,
+                                string_roll_out,
+                                tgt,
+                                to,
+                                0,
+                                false,
+                                MouseButton::Left,
+                            );
+                            handled = Avm2::dispatch_event(
+                                activation.context,
+                                avm2_event,
+                                avm2_target.into(),
+                            ) || handled;
+                        }
+                    }
+                }
+
                 handled.into()
             }
             ClipEvent::RollOver { from } | ClipEvent::DragOver { from } => {

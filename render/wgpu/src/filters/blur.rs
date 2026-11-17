@@ -105,8 +105,9 @@ impl BlurFilter {
         }
     }
 
-    fn pipeline(&self, descriptors: &Descriptors, msaa_sample_count: u32) -> &wgpu::RenderPipeline {
+    pub(crate) fn pipeline(&self, descriptors: &Descriptors, msaa_sample_count: u32) -> &wgpu::RenderPipeline {
         self.pipelines.get_or_init(msaa_sample_count, || {
+            let _timer = crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
             let label = create_debug_label!("Blur Filter ({} msaa)", msaa_sample_count);
             descriptors
                 .device
@@ -218,10 +219,7 @@ impl BlurFilter {
                 } else {
                     (
                         flip.color_view(),
-                        descriptors
-                            .quad
-                            .vertex_buffer
-                            .slice(descriptors.quad.vertices_filter.clone()),
+                        descriptors.quad.filter_vertices.slice(..),
                         flip.width() as f32,
                         flip.height() as f32,
                     )
@@ -323,6 +321,7 @@ impl BlurFilter {
                 ],
             });
 
+        crate::perf_counters::inc(crate::perf_counters::RENDER_PASS);
         let mut render_pass = draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: create_debug_label!("Blur filter").as_deref(),
             color_attachments: &[destination.color_attachments()],
@@ -334,9 +333,9 @@ impl BlurFilter {
 
         render_pass.set_vertex_buffer(0, vertices);
         render_pass.set_index_buffer(
-            descriptors.quad.index_buffer.slice(..),
+            descriptors.quad.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        render_pass.draw_indexed(descriptors.quad.indices_quad.clone(), 0, 0..1);
+        render_pass.draw_indexed(0..6, 0, 0..1);
     }
 }

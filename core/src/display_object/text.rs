@@ -39,6 +39,12 @@ pub struct TextData<'gc> {
 }
 
 impl<'gc> Text<'gc> {
+    /// AQW build: the shared data that every instance of this library symbol points to, used
+    /// to tell whether the symbol (and so its movie's library) is still in use.
+    pub fn aqw_shared(self) -> Gc<'gc, ()> {
+        Gc::erase(self.0.shared.get())
+    }
+
     pub fn from_swf_tag(
         context: &mut UpdateContext<'gc>,
         swf: SwfMovie<'gc>,

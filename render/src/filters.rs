@@ -87,6 +87,15 @@ impl Filter {
     }
 
     pub fn calculate_dest_rect(&self, source_rect: Rectangle<Twips>) -> Rectangle<Twips> {
+        // AQW build: an empty object has no bounds, filtered or not. Growing the "invalid"
+        // rectangle (whose coordinates are a sentinel at the edge of the Twips range) made it
+        // look valid: a filtered child that is momentarily empty then stretched its parent's
+        // bounds to ~6.7 million pixels, so the parent's cacheAsBitmap (and its own filters,
+        // like an item's glow) was skipped as oversized, flickering on and off as the
+        // animation went.
+        if !source_rect.is_valid() {
+            return source_rect;
+        }
         match self {
             Filter::BlurFilter(filter) => filter.calculate_dest_rect(source_rect),
             Filter::GlowFilter(filter) => filter.calculate_dest_rect(source_rect),

@@ -9,8 +9,12 @@ use std::collections::{HashMap, HashSet};
 pub enum KeyCodeMappingType {
     // TODO Make this configurable, it's not
     //   yet possible to use this mapping type.
-    #[expect(dead_code)]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        expect(dead_code)
+    )]
     Physical,
+    #[cfg_attr(any(target_os = "linux", target_os = "macos"), expect(dead_code))]
     Logical,
 }
 
@@ -104,8 +108,19 @@ impl InputManager {
             last_char: None,
             last_click: None,
             gamepad_button_mapping,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            key_code_mapping_type: KeyCodeMappingType::Physical,
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             key_code_mapping_type: KeyCodeMappingType::Logical,
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn clear_keys(&mut self) {
+        self.keys_down.clear();
+        self.keys_down_phys_loc.clear();
+        self.last_key = KeyCode::UNKNOWN;
+        self.last_char = None;
     }
 
     fn add_key(&mut self, key_code: KeyCode) {

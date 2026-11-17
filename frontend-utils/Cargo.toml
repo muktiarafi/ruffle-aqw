@@ -53,7 +53,10 @@ cpal = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-freetype-rs = { version = "0.38.0", optional = true }
+# AQW build: FreeType built in, so Mugetsu doesn't need the system's (freetype-sys 0.23 wants
+# FreeType 2.13; Ubuntu 22.04, which the Linux release is built on to run on 2022 systems,
+# has 2.12).
+freetype-rs = { version = "0.38.0", optional = true, features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

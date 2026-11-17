@@ -210,7 +210,7 @@ pub fn recursive_serialize<'gc>(
         // TODO: respect versioning
         // Flash appears to use vtable iteration order, but we sort ours
         // to make our test output consistent.
-        let mut props = vtable.public_properties().collect::<Vec<_>>();
+        let mut props = vtable.public_properties(activation.gc()).collect::<Vec<_>>();
         props.sort_by_key(|(name, _)| *name);
 
         for (name, prop) in props {

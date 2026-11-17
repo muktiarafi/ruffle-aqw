@@ -228,19 +228,45 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     error: Error::FetchError("Network unavailable".to_string()),
                 })?;
 
-                let mut request_builder = match request.method() {
-                    NavigationMethod::Get => client.get(processed_url.clone()),
-                    NavigationMethod::Post => client.post(processed_url.clone()),
+                let build_request = || {
+                    let mut request_builder = match request.method() {
+                        NavigationMethod::Get => client.get(processed_url.clone()),
+                        NavigationMethod::Post => client.post(processed_url.clone()),
+                    };
+                    let (body_data, mime) = request.body().clone().unwrap_or_default();
+                    for (name, val) in request.headers().iter() {
+                        request_builder = request_builder.header(name, val);
+                    }
+                    request_builder.header("Content-Type", &mime).body(body_data)
                 };
-                let (body_data, mime) = request.body().clone().unwrap_or_default();
-                for (name, val) in request.headers().iter() {
-                    request_builder = request_builder.header(name, val);
-                }
-                request_builder = request_builder.header("Content-Type", &mime);
 
-                request_builder = request_builder.body(body_data);
+                // AQW build (macOS): a DNS or connection hiccup while the game starts used to
+                // leave the window blank until Mugetsu was restarted. Retry a GET once; POSTs
+                // are not retried, as repeating them could repeat an action (e.g. a login).
+                #[cfg(target_os = "macos")]
+                let response = {
+                    let mut attempt = 0;
+                    loop {
+                        match spawn_tokio(build_request().send()).await {
+                            Err(e)
+                                if attempt == 0
+                                    && request.method() == NavigationMethod::Get
+                                    && e.is_connect() =>
+                            {
+                                attempt = 1;
+                                tracing::warn!(
+                                    "Could not connect to {processed_url}: {e}; retrying once"
+                                );
+                                Timer::after(Duration::from_millis(750)).await;
+                            }
+                            response => break response,
+                        }
+                    }
+                };
+                #[cfg(not(target_os = "macos"))]
+                let response = spawn_tokio(build_request().send()).await;
 
-                let response = spawn_tokio(request_builder.send()).await.map_err(|e| {
+                let response = response.map_err(|e| {
                     let inner = if e.is_connect() {
                         Error::InvalidDomain(processed_url.to_string())
                     } else {

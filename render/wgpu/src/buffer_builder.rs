@@ -59,6 +59,26 @@ impl BufferBuilder {
         Ok((start_pos as wgpu::BufferAddress)..(self.inner.len() as wgpu::BufferAddress))
     }
 
+    /// AQW build: `add`, starting at a multiple of the element size (vertices: see
+    /// `CommandRenderer::render_shape`).
+    pub fn add_strided<T: NoUninit + AnyBitPattern>(
+        &mut self,
+        value: &[T],
+    ) -> Result<Range<wgpu::BufferAddress>, BufferFull> {
+        let start = self.inner.len().next_multiple_of(std::mem::size_of::<T>().max(1));
+        if (start + std::mem::size_of_val(value)) as u64 > self.limit {
+            return Err(BufferFull);
+        }
+        self.inner.resize(start, 0);
+        self.inner.extend_from_slice(bytemuck::cast_slice(value));
+        Ok((start as wgpu::BufferAddress)..(self.inner.len() as wgpu::BufferAddress))
+    }
+
+    /// AQW build: the bytes added so far (see `crate::arena`).
+    pub fn bytes(&self) -> &[u8] {
+        &self.inner
+    }
+
     pub fn finish(
         self,
         device: &wgpu::Device,
@@ -83,9 +103,5 @@ impl BufferBuilder {
                 staging_belt.write_buffer(encoder, buffer, BufferAddress::default(), length);
             view.copy_from_slice(&self.inner);
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
     }
 }

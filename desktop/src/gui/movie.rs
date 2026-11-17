@@ -208,16 +208,23 @@ impl MovieView {
         }
     }
 
-    pub fn render(
-        &self,
-        renderer: &MovieViewRenderer,
-        render_pass: &mut wgpu::RenderPass<'static>,
-    ) {
-        render_pass.set_pipeline(&renderer.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, renderer.vertices.slice(..));
-        render_pass.draw(0..6, 0..1);
+    /// AQW build: what draws this view's texture (see `blit`), for a window frame drawn from
+    /// the present thread after this view may have been resized.
+    pub fn bind_group(&self) -> wgpu::BindGroup {
+        self.bind_group.clone()
     }
+}
+
+/// AQW build: draws a movie view's texture (`bind_group`) into `render_pass`.
+pub fn blit(
+    renderer: &MovieViewRenderer,
+    bind_group: &wgpu::BindGroup,
+    render_pass: &mut wgpu::RenderPass<'static>,
+) {
+    render_pass.set_pipeline(&renderer.pipeline);
+    render_pass.set_bind_group(0, bind_group, &[]);
+    render_pass.set_vertex_buffer(0, renderer.vertices.slice(..));
+    render_pass.draw(0..6, 0..1);
 }
 
 impl RenderTarget for MovieView {
@@ -260,6 +267,15 @@ impl RenderTarget for MovieView {
         _frame: Self::Frame,
     ) -> wgpu::SubmissionIndex {
         queue.submit(command_buffers)
+    }
+
+    /// AQW build: the texture is shown by the window's frame, drawn on the same thread after
+    /// this (see `GuiController::render`).
+    fn submit_later(
+        &self,
+        _frame: Self::Frame,
+    ) -> Result<ruffle_render_wgpu::target::LaterSubmit, Self::Frame> {
+        Ok(Box::new(|queue, command_buffers| queue.submit(command_buffers)))
     }
 }
 

@@ -39,6 +39,11 @@ pub struct BoundMethod<'gc> {
 }
 
 impl<'gc> BoundMethod<'gc> {
+    /// Whether this is a method closure bound to a receiver (`obj.method`).
+    pub fn is_bound(&self) -> bool {
+        self.bound_receiver.is_some()
+    }
+
     pub fn from_method(
         method: Method<'gc>,
         scope: ScopeChain<'gc>,

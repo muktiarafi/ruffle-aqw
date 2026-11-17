@@ -278,6 +278,13 @@ impl ActivePlayer {
             .map_err(|e| anyhow!(e.to_string()))
             .expect("Couldn't create wgpu rendering backend");
         RENDER_INFO.with(|i| *i.borrow_mut() = Some(renderer.debug_info().to_string()));
+        // AQW build: with the render thread on, pictures are recorded there (see
+        // `ruffle_render_wgpu::render_thread`).
+        let renderer: Box<dyn RenderBackend> = if ruffle_render_wgpu::render_thread::enabled() {
+            Box::new(ruffle_render_wgpu::render_thread::ThreadedBackend::new(renderer))
+        } else {
+            Box::new(renderer)
+        };
 
         if opt.player.dummy_external_interface.unwrap_or_default() {
             builder = builder.with_external_interface(Box::new(DesktopExternalInterfaceProvider {
@@ -304,7 +311,7 @@ impl ActivePlayer {
 
         builder = builder
             .with_navigator(navigator)
-            .with_renderer(renderer)
+            .with_boxed_renderer(renderer)
             .with_storage(preferences.storage_backend().create_backend(&opt))
             .with_notification_sender(notification_sender)
             .with_fs_commands(Box::new(DesktopFSCommandProvider {
@@ -343,7 +350,7 @@ impl ActivePlayer {
             .with_avm2_dse_enabled(opt.avm2_dse_enabled);
         let player = builder.build();
 
-        window.set_title(&format!("Ruffle - {readable_name}"));
+        window.set_title(&crate::window_title()); // AQW build: name the window after the launcher, not the SWF.
 
         SWF_INFO.with(|i| *i.borrow_mut() = Some(readable_name));
 

@@ -40,6 +40,12 @@ pub enum RuffleEvent {
     /// The user selected an item in the right-click context menu.
     ContextMenuItemClicked(usize),
 
+    /// AQW build: the user changed one of Mugetsu's settings (right-click menu).
+    MugetsuSetting(crate::mugetsu::Setting),
+
+    /// AQW build: something to tell the player in the game window (a new version, tips).
+    MugetsuNotice(crate::mugetsu::Notice),
+
     /// The movie wants to open a dialog.
     OpenDialog(DialogDescriptor),
 

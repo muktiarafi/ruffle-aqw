@@ -50,6 +50,8 @@ pub fn initialize_for_allocator<'gc>(
     // frame behind objects placed by the timeline (even if they were
     // both placed in the same frame to begin with).
     dobj.base().set_skip_next_enter_frame(true);
+    // AQW build: `enter_frame` has to come by again (see `display_object::settle`).
+    dobj.wake();
     dobj.on_construction_complete(context);
 
     obj
@@ -80,6 +82,7 @@ pub fn set_alpha<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let new_alpha = args.get_f64(0);
+        aqw_trace(dobj, "alpha", || format!("{new_alpha}"));
         dobj.set_alpha(new_alpha);
     }
 
@@ -111,6 +114,7 @@ pub fn set_height<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let new_height = args.get_f64(0);
+        aqw_trace(dobj, "height", || format!("{new_height}"));
         if new_height >= 0.0 {
             dobj.set_height(activation.context, new_height);
         }
@@ -185,6 +189,7 @@ pub fn set_scale_y<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let new_scale = args.get_f64(0);
+        aqw_trace(dobj, "scaleY", || format!("{new_scale}"));
         dobj.set_scale_y(Percent::from_unit(new_scale));
     }
 
@@ -216,6 +221,7 @@ pub fn set_width<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let new_width = args.get_f64(0);
+        aqw_trace(dobj, "width", || format!("{new_width}"));
         if new_width >= 0.0 {
             dobj.set_width(activation.context, new_width);
         }
@@ -249,6 +255,7 @@ pub fn set_scale_x<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let new_scale = args.get_f64(0);
+        aqw_trace(dobj, "scaleX", || format!("{new_scale}"));
         dobj.set_scale_x(Percent::from_unit(new_scale));
     }
 
@@ -300,9 +307,11 @@ pub fn set_filters<'gc>(
                     filter_vec.push(Filter::from_avm2_object(activation, filter_object)?);
                 }
 
+                aqw_trace(dobj, "filters", || format!("{filter_vec:?}"));
                 dobj.set_filters(filter_vec.into_boxed_slice());
             }
         } else {
+            aqw_trace(dobj, "filters", || "[] (null)".to_string());
             dobj.set_filters(Default::default());
         }
     }
@@ -335,6 +344,7 @@ pub fn set_x<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let x = args.get_f64(0);
+        aqw_trace(dobj, "x", || format!("{x}"));
         dobj.set_x(Twips::from_pixels(x));
     }
 
@@ -366,6 +376,7 @@ pub fn set_y<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let y = args.get_f64(0);
+        aqw_trace(dobj, "y", || format!("{y}"));
         dobj.set_y(Twips::from_pixels(y));
     }
 
@@ -507,6 +518,7 @@ pub fn set_rotation<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let mut new_rotation = args.get_f64(0);
+        aqw_trace(dobj, "rotation", || format!("{new_rotation}"));
 
         // Normalize into the range of [-180, 180].
         new_rotation %= 360.0;
@@ -644,6 +656,7 @@ pub fn set_visible<'gc>(
 
     if let Some(dobj) = this.as_display_object() {
         let new_visible = args.get_bool(0);
+        aqw_trace(dobj, "visible", || format!("{new_visible}"));
 
         dobj.set_visible(activation.context, new_visible);
     }
@@ -1054,6 +1067,16 @@ pub fn get_bounds<'gc>(
 
         let out_bounds = get_dobj_bounds(dobj, target, BoundsMode::Script);
 
+        aqw_trace(dobj, "getBounds", || {
+            format!(
+                "-> x {} y {} w {} h {} (in {})",
+                out_bounds.x_min.to_pixels(),
+                out_bounds.y_min.to_pixels(),
+                out_bounds.width().to_pixels(),
+                out_bounds.height().to_pixels(),
+                aqw_path(target)
+            )
+        });
         return new_rectangle(activation, out_bounds);
     }
     Ok(Value::Undefined)
@@ -1074,6 +1097,16 @@ pub fn get_rect<'gc>(
 
         let out_bounds = get_dobj_bounds(dobj, target, BoundsMode::ScriptWithoutStrokes);
 
+        aqw_trace(dobj, "getRect", || {
+            format!(
+                "-> x {} y {} w {} h {} (in {})",
+                out_bounds.x_min.to_pixels(),
+                out_bounds.y_min.to_pixels(),
+                out_bounds.width().to_pixels(),
+                out_bounds.height().to_pixels(),
+                aqw_path(target)
+            )
+        });
         return new_rectangle(activation, out_bounds);
     }
     Ok(Value::Undefined)
@@ -1106,6 +1139,7 @@ pub fn set_mask<'gc>(
 
     if let Some(this) = this.as_display_object() {
         let mask = args.try_get_object(0).and_then(|o| o.as_display_object());
+        aqw_trace(this, "mask", || format!("{:?}", mask.map(|m| aqw_path(m))));
         this.set_mask(mask, activation.gc());
     }
     Ok(Value::Undefined)
@@ -1133,6 +1167,7 @@ pub fn set_cache_as_bitmap<'gc>(
 
     if let Some(this) = this.as_display_object() {
         let cache = args.get_bool(0);
+        aqw_trace(this, "cacheAsBitmap", || format!("{cache}"));
         this.set_bitmap_cached_preference(cache);
     }
     Ok(Value::Undefined)
@@ -1202,4 +1237,49 @@ pub fn set_blend_shader<'gc>(
         dobj.set_blend_shader(Some(shader_handle));
     }
     Ok(Value::Undefined)
+}
+
+/// AQW build: `RUFFLE_TRACE_DISPLAY=1` logs (target `ruffle_aqw_trace`) the display object
+/// properties ActionScript sets and the bounds it reads, with the object's name path, to
+/// compare a glitch's behavior with Flash. At most 400 lines per second.
+fn aqw_trace<'gc>(dobj: DisplayObject<'gc>, what: &str, value: impl FnOnce() -> String) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("RUFFLE_TRACE_DISPLAY").is_some()) {
+        return;
+    }
+    static WINDOW: AtomicU64 = AtomicU64::new(0);
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let second = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if WINDOW.swap(second, Ordering::Relaxed) != second {
+        COUNT.store(0, Ordering::Relaxed);
+    }
+    if COUNT.fetch_add(1, Ordering::Relaxed) >= 400 {
+        return;
+    }
+    let mut value = value();
+    value.truncate(300);
+    tracing::info!(target: "ruffle_aqw_trace", "{} .{what} = {value}", aqw_path(dobj));
+}
+
+/// `parent.parent.name/parent.name/name [Class]`, up to 5 levels.
+fn aqw_path<'gc>(dobj: DisplayObject<'gc>) -> String {
+    let mut parts = Vec::new();
+    let mut node = Some(dobj);
+    while let Some(object) = node {
+        if parts.len() == 5 {
+            parts.push("..".to_string());
+            break;
+        }
+        parts.push(object.name().map_or_else(|| "?".to_string(), |n| n.to_string()));
+        node = object.parent();
+    }
+    parts.reverse();
+    let class = dobj
+        .object2()
+        .map(|o| o.instance_class().name().local_name().to_string())
+        .unwrap_or_default();
+    format!("{} [{class}]", parts.join("/"))
 }

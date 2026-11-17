@@ -66,12 +66,15 @@ impl BlendType {
     }
 }
 
-#[derive(Enum, Debug, Copy, Clone, PartialEq)]
+#[derive(Enum, Debug, Copy, Clone)]
 pub enum TrivialBlend {
     Normal,
     Add,
     Subtract,
     Screen,
+    /// Only valid onto a fully opaque target (see `ComplexBlend::Multiply`): with dst alpha
+    /// 1 the multiply shader reduces to `src * dst + dst * (1 - src_alpha)`.
+    MultiplyOntoOpaque,
 }
 
 impl TrivialBlend {
@@ -100,6 +103,14 @@ impl TrivialBlend {
                     src_factor: wgpu::BlendFactor::One,
                     dst_factor: wgpu::BlendFactor::One,
                     operation: wgpu::BlendOperation::ReverseSubtract,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            },
+            TrivialBlend::MultiplyOntoOpaque => wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Dst,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
                 },
                 alpha: wgpu::BlendComponent::OVER,
             },

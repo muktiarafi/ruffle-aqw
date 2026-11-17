@@ -1,8 +1,7 @@
 use crate::blend::{ComplexBlend, TrivialBlend};
 use crate::layouts::BindLayouts;
 use crate::shaders::Shaders;
-use crate::surface::mask::MaskMode;
-use crate::{PosColorVertex, PosUvVertex, PosVertex};
+use crate::{MaskState, PosColorVertex, PosUvVertex, PosVertex};
 use enum_map::{EnumMap, enum_map};
 use wgpu::{BlendState, PrimitiveTopology, vertex_attr_array};
 
@@ -31,13 +30,13 @@ pub const VERTEX_BUFFERS_DESCRIPTION_COLOR: [Option<wgpu::VertexBufferLayout>; 1
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &vertex_attr_array![
             0 => Float32x2,
-            1 => Float32x4,
+            1 => Unorm8x4,
         ],
     })];
 
 #[derive(Debug)]
 pub struct ShapePipeline {
-    pub pipelines: EnumMap<MaskMode, wgpu::RenderPipeline>,
+    pub pipelines: EnumMap<MaskState, wgpu::RenderPipeline>,
     stencilless: wgpu::RenderPipeline,
 }
 
@@ -57,12 +56,17 @@ pub struct Pipelines {
     pub bitmap: EnumMap<TrivialBlend, ShapePipeline>,
     pub gradients: ShapePipeline,
     pub complex_blends: EnumMap<ComplexBlend, ShapePipeline>,
+    /// AQW build: `complex_blends` for layers read straight from their atlas page (see
+    /// `complex_blend_page`), each made when first used.
+    complex_blends_page: EnumMap<ComplexBlend, std::sync::OnceLock<ShapePipeline>>,
+    format: wgpu::TextureFormat,
+    msaa_sample_count: u32,
     pub alpha_mask: ShapePipeline,
 }
 
 impl ShapePipeline {
-    pub fn pipeline_for(&self, mask_mode: MaskMode) -> &wgpu::RenderPipeline {
-        &self.pipelines[mask_mode]
+    pub fn pipeline_for(&self, mask_state: MaskState) -> &wgpu::RenderPipeline {
+        &self.pipelines[mask_state]
     }
 
     pub fn stencilless_pipeline(&self) -> &wgpu::RenderPipeline {
@@ -74,7 +78,7 @@ impl ShapePipeline {
     /// for each possible `MaskState`.
     fn build(
         stencilless: wgpu::RenderPipeline,
-        f: impl FnMut(MaskMode) -> wgpu::RenderPipeline,
+        f: impl FnMut(MaskState) -> wgpu::RenderPipeline,
     ) -> Self {
         ShapePipeline {
             pipelines: EnumMap::from_fn(f),
@@ -84,6 +88,40 @@ impl ShapePipeline {
 }
 
 impl Pipelines {
+    /// AQW build: the pipelines of a complex blend whose layer is read straight from its atlas
+    /// page (`Shaders::blend_page_shader`): drawn like a bitmap, as a quad with its own
+    /// vertices and a transform, with the blend's two textures as its third bind group.
+    pub fn complex_blend_page(
+        &self,
+        descriptors: &crate::Descriptors,
+        blend: ComplexBlend,
+    ) -> &ShapePipeline {
+        self.complex_blends_page[blend].get_or_init(|| {
+            let _timer = crate::perf_counters::timers::Scoped::new(
+                crate::perf_counters::timers::PIPELINE,
+            );
+            let layouts = &descriptors.bind_layouts;
+            create_shape_pipeline(
+                &format!("Complex Blend from a page: {blend:?}"),
+                &descriptors.device,
+                self.format,
+                descriptors
+                    .shaders
+                    .blend_page_shader(&descriptors.device, blend),
+                self.msaa_sample_count,
+                &VERTEX_BUFFERS_DESCRIPTION_POS_UV,
+                &[
+                    Some(&layouts.globals),
+                    Some(&layouts.transforms),
+                    Some(&layouts.blend),
+                ],
+                BlendState::REPLACE,
+                0,
+                PrimitiveTopology::TriangleList,
+            )
+        })
+    }
+
     pub fn new(
         device: &wgpu::Device,
         shaders: &Shaders,
@@ -258,6 +296,9 @@ impl Pipelines {
             bitmap_opaque_dummy_stencil: bitmap_opaque_dummy_depth,
             gradients: gradient_pipeline,
             complex_blends: complex_blend_pipelines,
+            complex_blends_page: EnumMap::default(),
+            format,
+            msaa_sample_count,
             alpha_mask: alpha_mask_pipeline,
         }
     }
@@ -387,8 +428,8 @@ fn create_shape_pipeline(
             &[],
             primitive_topology,
         )),
-        |mask_mode| match mask_mode {
-            MaskMode::NoMask => mask_render_state(
+        |mask_state| match mask_state {
+            MaskState::NoMask => mask_render_state(
                 "no mask",
                 wgpu::StencilFaceState {
                     compare: wgpu::CompareFunction::Always,
@@ -398,7 +439,7 @@ fn create_shape_pipeline(
                 },
                 wgpu::ColorWrites::ALL,
             ),
-            MaskMode::DrawMaskStencil => mask_render_state(
+            MaskState::DrawMaskStencil => mask_render_state(
                 "draw mask stencil",
                 wgpu::StencilFaceState {
                     compare: wgpu::CompareFunction::Equal,
@@ -408,7 +449,7 @@ fn create_shape_pipeline(
                 },
                 wgpu::ColorWrites::empty(),
             ),
-            MaskMode::DrawMaskedContent => mask_render_state(
+            MaskState::DrawMaskedContent => mask_render_state(
                 "draw masked content",
                 wgpu::StencilFaceState {
                     compare: wgpu::CompareFunction::Equal,
@@ -418,7 +459,7 @@ fn create_shape_pipeline(
                 },
                 wgpu::ColorWrites::ALL,
             ),
-            MaskMode::ClearMaskStencil => mask_render_state(
+            MaskState::ClearMaskStencil => mask_render_state(
                 "clear mask stencil",
                 wgpu::StencilFaceState {
                     compare: wgpu::CompareFunction::Equal,

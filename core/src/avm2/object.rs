@@ -28,6 +28,7 @@ use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
+pub(crate) mod aqw_inspect;
 mod array_object;
 mod bitmapdata_object;
 mod bytearray_object;
@@ -117,7 +118,9 @@ pub use crate::avm2::object::font_description_object::{
     FontDescriptionObject, FontDescriptionObjectWeak, font_description_allocator,
 };
 pub use crate::avm2::object::font_object::{FontObject, FontObjectWeak, font_allocator};
-pub use crate::avm2::object::function_object::{FunctionObject, FunctionObjectWeak};
+pub use crate::avm2::object::function_object::{
+    FunctionObject, FunctionObjectData, FunctionObjectWeak,
+};
 pub use crate::avm2::object::index_buffer_3d_object::{
     IndexBuffer3DObject, IndexBuffer3DObjectWeak,
 };
@@ -671,7 +674,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
         let mut values = Vec::new();
 
         // First slots...
-        for (name, prop) in vtable.public_properties() {
+        for (name, prop) in vtable.public_properties(activation.gc()) {
             if let Property::Slot { slot_id } | Property::ConstSlot { slot_id } = prop {
                 let value = self.base().get_slot(slot_id);
                 values.push((name, value));
@@ -679,7 +682,7 @@ pub trait TObject<'gc>: 'gc + Collect<'gc> + Debug + Into<Object<'gc>> + Clone +
         }
 
         // ...then getters.
-        for (name, prop) in vtable.public_properties() {
+        for (name, prop) in vtable.public_properties(activation.gc()) {
             if let Property::Virtual { get: Some(get), .. } = prop {
                 let value = Value::from(*self).call_method(get, &[], activation)?;
                 values.push((name, value));

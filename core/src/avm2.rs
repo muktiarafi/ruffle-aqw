@@ -45,6 +45,7 @@ mod e4x;
 pub mod error;
 pub mod error_messages;
 mod events;
+pub use events::{WEAK_ANON_LISTENERS, WEAK_LISTENERS};
 mod filters;
 mod flv;
 mod function;
@@ -162,6 +163,14 @@ pub struct Avm2<'gc> {
     /// currently present on the display list. This list keeps track of that.
     broadcast_list: FnvHashMap<AvmString<'gc>, Vec<WeakObject<'gc>>>,
 
+    /// AQW build: every weak-keyed `Dictionary`, for the ephemeron step after marking.
+    weak_dictionaries: Vec<object::DictionaryObjectWeak<'gc>>,
+
+    /// AQW build: every `LoaderInfo` and every loaded ABC block, weakly. While one is alive, the
+    /// library of its movie stays in use (see `Library::finalize_movie_libraries`).
+    loader_infos: Vec<object::LoaderInfoObjectWeak<'gc>>,
+    code_anchors: Vec<crate::library::MovieAnchor<'gc>>,
+
     alias_to_class_map: FnvHashMap<AvmString<'gc>, ClassObject<'gc>>,
     class_to_alias_map: FnvHashMap<Class<'gc>, AvmString<'gc>>,
 
@@ -216,6 +225,9 @@ impl<'gc> Avm2<'gc> {
             native_custom_constructor_table: Default::default(),
             native_fast_call_list: Default::default(),
             broadcast_list: Default::default(),
+            weak_dictionaries: Vec::new(),
+            loader_infos: Vec::new(),
+            code_anchors: Vec::new(),
 
             alias_to_class_map: Default::default(),
             class_to_alias_map: Default::default(),
@@ -362,6 +374,72 @@ impl<'gc> Avm2<'gc> {
     ///
     /// Attempts to register the same listener for the same event will also do
     /// nothing.
+    /// AQW build: tracks a weak-keyed `Dictionary` for the ephemeron step.
+    pub fn register_weak_dictionary(&mut self, dictionary: object::DictionaryObject<'gc>) {
+        self.weak_dictionaries.retain(|d| !d.0.is_dropped());
+        self.weak_dictionaries.push(dictionary.downgrade());
+    }
+
+    /// AQW build: ephemeron step over all live weak-keyed dictionaries, run once marking is
+    /// complete. Returns whether anything was revived (then marking must continue and this run
+    /// again); otherwise unreachable-key entries have been removed.
+    pub fn register_loader_info(&mut self, loader_info: object::LoaderInfoObject<'gc>) {
+        self.loader_infos.retain(|w| !w.0.is_dropped());
+        self.loader_infos
+            .push(object::LoaderInfoObjectWeak(Gc::downgrade(loader_info.0)));
+    }
+
+    /// AQW build: inserts the movies (as `Arc::as_ptr` addresses) whose `LoaderInfo` or code is
+    /// still reachable. Only valid during finalization.
+    pub fn movie_anchors(
+        &self,
+        fc: &gc_arena::Finalization<'gc>,
+        anchored: &mut fnv::FnvHashSet<usize>,
+    ) {
+        for weak in &self.loader_infos {
+            if !weak.0.is_dead(fc)
+                && let Some(loader_info) = weak.0.upgrade(fc)
+            {
+                let loader_info = object::LoaderInfoObject(loader_info);
+                anchored.insert(crate::library::Library::movie_addr(loader_info.loader_stream().movie()));
+            }
+        }
+        for anchor in &self.code_anchors {
+            if !anchor.is_dead(fc) {
+                anchored.insert(anchor.movie_addr());
+            }
+        }
+    }
+
+    /// AQW build: forgets anchors that are about to be collected.
+    pub fn prune_movie_anchors(&mut self, fc: &gc_arena::Finalization<'gc>) {
+        self.loader_infos.retain(|w| !w.0.is_dead(fc));
+        self.code_anchors.retain(|a| !a.is_dead(fc));
+    }
+
+    pub fn finalize_weak_dictionaries(
+        &self,
+        fc: &gc_arena::Finalization<'gc>,
+        allow_remove: bool,
+    ) -> bool {
+        let live = || {
+            self.weak_dictionaries
+                .iter()
+                .filter(|d| !d.0.is_dead(fc))
+                .filter_map(|d| d.0.upgrade(fc).map(object::DictionaryObject))
+        };
+        let mut revived = false;
+        for dictionary in live() {
+            revived |= dictionary.finalize_weak_keys(fc, false);
+        }
+        if !revived && allow_remove {
+            for dictionary in live() {
+                dictionary.finalize_weak_keys(fc, true);
+            }
+        }
+        revived
+    }
+
     pub fn register_broadcast_listener(
         context: &mut UpdateContext<'gc>,
         object: Object<'gc>,
@@ -522,6 +600,11 @@ impl<'gc> Avm2<'gc> {
 
         let num_scripts = abc.scripts.len();
         let tunit = TranslationUnit::from_abc(abc, domain, name, movie, activation.gc());
+        activation
+            .context
+            .avm2
+            .code_anchors
+            .push(crate::library::MovieAnchor::new(tunit.downgrade_erased(), tunit.movie()));
         tunit.load_classes(&mut activation)?;
         for i in 0..num_scripts {
             tunit.load_script(i as u32, &mut activation)?;

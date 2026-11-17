@@ -244,6 +244,12 @@ impl EditTextData<'_> {
 }
 
 impl<'gc> EditText<'gc> {
+    /// AQW build: the shared data that every instance of this library symbol points to, used
+    /// to tell whether the symbol (and so its movie's library) is still in use.
+    pub fn aqw_shared(self) -> Gc<'gc, ()> {
+        Gc::erase(self.0.shared)
+    }
+
     const ANY_NEWLINE: [char; 2] = ['\n', '\r'];
 
     // This seems to be OS-independent
@@ -1499,6 +1505,66 @@ impl<'gc> EditText<'gc> {
         }
 
         if old_selection != self.0.selection.get() {
+            self.invalidate_cached_bitmap();
+        }
+        self.scroll_caret_into_view();
+    }
+
+    /// AQW build: like Flash, scroll a non-wrapping text field sideways so the caret stays
+    /// visible while typing, moving the cursor or drag-selecting (Ruffle never scrolled, so
+    /// text typed past the end of AQW's chat box was hidden). Each text change resets the
+    /// scroll to 0 (`relayout`), so this runs after every selection update.
+    fn scroll_caret_into_view(self) {
+        if self.0.flags.get().contains(EditTextFlag::WORD_WRAP) {
+            return;
+        }
+        let Some(selection) = self.0.selection.get() else {
+            return;
+        };
+        let position = selection.to;
+        let caret_x = {
+            let layout = self.0.layout.borrow();
+            let line_of = |pos: usize| {
+                layout
+                    .find_line_index_by_position(pos)
+                    .and_then(|index| layout.lines().get(index))
+            };
+            // The caret sits at the left edge of the character after it, or at the right
+            // edge of the last character when it's at the end of the line.
+            line_of(position)
+                .and_then(|line| line.char_x_bounds(position))
+                .map(|(start, _)| start)
+                .or_else(|| {
+                    let before = position.checked_sub(1)?;
+                    line_of(before)?.char_x_bounds(before).map(|(_, end)| end)
+                })
+        };
+        let Some(caret_x) = caret_x else {
+            self.0.hscroll.set(0.0);
+            return;
+        };
+        let scale = if self.font_type() == FontType::Device {
+            self.device_font_scale_x() as f64
+        } else {
+            1.0
+        };
+        let caret = caret_x.to_pixels() * scale;
+        let window = (self.0.bounds.get().width() - Self::GUTTER * 2)
+            .max(Twips::ZERO)
+            .to_pixels();
+        let hscroll = self.0.hscroll.get();
+        // Scroll just far enough that the caret sits at the edge it went past, so the text
+        // slides along one character at a time while typing.
+        let new_hscroll = if caret > hscroll + window {
+            caret - window
+        } else if caret < hscroll {
+            caret
+        } else {
+            return;
+        };
+        let new_hscroll = new_hscroll.clamp(0.0, self.maxhscroll().max(0.0)).round();
+        if new_hscroll != hscroll {
+            self.0.hscroll.set(new_hscroll);
             self.invalidate_cached_bitmap();
         }
     }

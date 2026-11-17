@@ -50,6 +50,12 @@ pub struct FunctionObjectData<'gc> {
 }
 
 impl<'gc> FunctionObject<'gc> {
+    /// Whether this is a method closure bound to its receiver. Ruffle caches those on the
+    /// receiver (`bound_methods`), so they live exactly as long as it does.
+    pub fn is_bound_method(self) -> bool {
+        self.0.exec.is_bound()
+    }
+
     /// Construct a function from an ABC method and the current closure scope.
     ///
     /// This associated constructor will also create and initialize an empty

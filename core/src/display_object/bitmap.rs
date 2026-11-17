@@ -217,6 +217,8 @@ impl<'gc> Bitmap<'gc> {
     }
 
     pub fn set_pixel_snapping(self, value: PixelSnapping) {
+        // AQW build: it's drawn differently (see `replay::lean_render`).
+        super::replay::mark_dirty(&self.base());
         self.0.pixel_snapping.set(value);
     }
 
@@ -283,6 +285,8 @@ impl<'gc> Bitmap<'gc> {
     }
 
     pub fn set_smoothing(self, smoothing: bool) {
+        // AQW build: it's drawn differently (see `replay::lean_render`).
+        super::replay::mark_dirty(&self.base());
         self.0.smoothing.set(smoothing);
     }
 

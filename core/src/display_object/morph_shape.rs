@@ -1,6 +1,9 @@
+use crate::display_object::graphic::deferred_shapes;
+use crate::tessellation_cache::{MadeFor, Measure, TessellationCache};
 use crate::avm1::Object as Avm1Object;
 use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::{RenderContext, UpdateContext};
+use crate::display_object::interp::TweenRatio;
 use crate::display_object::{BoundsMode, DisplayObjectBase};
 use crate::library::MovieLibrarySource;
 use crate::prelude::*;
@@ -13,8 +16,11 @@ use gc_arena::{Collect, Gc, Mutation};
 use ruffle_common::utils::HasPrefixField;
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::commands::CommandHandler;
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
+use std::rc::Rc;
+use std::sync::Arc;
 use swf::{Fixed8, Fixed16};
+use web_time::Instant;
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
@@ -36,9 +42,29 @@ pub struct MorphShapeData<'gc> {
     shared: Lock<Gc<'gc, MorphShapeShared<'gc>>>,
     /// The AVM2 representation of this MorphShape.
     object: Lock<Option<Avm2StageObject<'gc>>>,
+    /// AQW build: for a very detailed tween (see `MorphShapeShared::get_heavy_shape`).
+    #[collect(require_static)]
+    warming: RefCell<Warming>,
+}
+
+/// AQW build: an instance of a very detailed tween, while frames of it are being tessellated
+/// in the background (see `MorphShapeShared::get_heavy_shape`).
+#[derive(Clone, Default)]
+struct Warming {
+    /// The tessellation it was last drawn with.
+    last: Option<ShapeHandle>,
+    /// The frames it asked for that weren't ready, oldest first: each one's tessellations,
+    /// and the size it was asked for.
+    pending: Vec<(Rc<RefCell<TessellationCache>>, Measure)>,
 }
 
 impl<'gc> MorphShape<'gc> {
+    /// AQW build: the shared data that every instance of this library symbol points to, used
+    /// to tell whether the symbol (and so its movie's library) is still in use.
+    pub fn aqw_shared(self) -> Gc<'gc, ()> {
+        Gc::erase(self.0.shared.get())
+    }
+
     pub fn from_swf_tag(
         gc_context: &Mutation<'gc>,
         tag: swf::DefineMorphShape,
@@ -51,6 +77,7 @@ impl<'gc> MorphShape<'gc> {
                 base: Default::default(),
                 shared: Lock::new(Gc::new(gc_context, shared)),
                 object: Lock::new(None),
+                warming: Default::default(),
             },
         ))
     }
@@ -113,7 +140,56 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
     fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
         let ratio = self.ratio();
         let shared = self.0.shared.get();
-        let shape_handle = shared.get_shape(context, ratio);
+        // AQW build: with frame interpolation, drawn between the previous and current ratio,
+        // unless that's too slow to tessellate (see `MorphShapeShared::get_blended_shape`). A
+        // tween that changes little per frame gets in-betweens by how far it moves on screen,
+        // if it's a simple one (see `MorphShapeShared::travel_px_if_simple`).
+        let drawn = self.base().interp.ratio(ratio, &shared.rhythm, || {
+            let matrix = &context.transform_stack.transform().matrix;
+            shared.travel_px_if_simple() * Measure::of(matrix).scale
+        });
+        if trace_tweens() {
+            // (Testing: where each instance is drawn in each picture, to measure how evenly
+            // it moves; see tools/exit-tests in the Mugetsu folder.)
+            tracing::info!(
+                target: "ruffle_aqw_perf",
+                "tween trace: {} {:p} frame {} at {:?} real {} drawn {:?}",
+                shared.id,
+                Gc::as_ptr(self.0),
+                crate::display_object::interp::frame(),
+                crate::display_object::interp::amount(),
+                ratio,
+                drawn,
+            );
+        }
+        // AQW build: with Flash-style edges, tessellated at the size it's drawn (see
+        // `Graphic`), so its soft edges are half a pixel wide on screen.
+        let scale = if ruffle_render::tessellator::edge_aa() {
+            // Without a stretch: morphs animate (see `TessellationCache::find_near_and_touch`).
+            let measure = Measure::of(&context.transform_stack.transform().matrix);
+            Measure {
+                stretch: [1.0, 0.0, 1.0, measure.stretch[3]],
+                ..measure
+            }
+        } else {
+            Measure {
+                scale: 1.0,
+                stretch: ruffle_render::backend::NO_STRETCH,
+            }
+        };
+        let (real, blended) = match drawn {
+            TweenRatio::Real(ratio) => (ratio, None),
+            TweenRatio::Between { ratio, previous } => {
+                (previous, shared.get_blended_shape(context, ratio, scale))
+            }
+        };
+        let shape_handle = match blended {
+            Some(handle) => handle,
+            None if shared.heavy() => {
+                shared.get_heavy_shape(context, &self.0.warming, real, scale)
+            }
+            None => shared.get_shape(context, real, scale),
+        };
         context
             .commands
             .render_shape(shape_handle, context.transform_stack.transform());
@@ -184,10 +260,61 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
 }
 
 /// A precalculated intermediate frame for a morph shape.
+/// AQW build: how many sizes a shape tween's frame keeps tessellations for (see `Frame`).
+const SIZES_KEPT: usize = 4;
+
+/// AQW build: an in-between ratio of frame interpolation that takes longer than this (ms) to
+/// tessellate is slow. `SLOW_IN_BETWEENS` in a row (one could be the thread being interrupted)
+/// and the tween is drawn at its real ratios only (see `MorphShapeShared::get_blended_shape`).
+const SLOW_IN_BETWEEN_MS: f64 = 2.0;
+const SLOW_IN_BETWEENS: u8 = 2;
+
+/// AQW build: a real ratio that takes longer than this (ms) to tessellate is logged, once per
+/// tween.
+const SLOW_FRAME_MS: f64 = 20.0;
+
+/// AQW build: a tween of more records than this, or one a frame of which took longer than
+/// `HEAVY_FRAME_MS` to tessellate, is heavy: its frames are tessellated in the background (see
+/// `MorphShapeShared::get_heavy_shape`). Records alone say little about the time (a staff's
+/// tween of 3,139 took 3 ms a frame, a cape's of 4,629 took 22-32), but this way the first
+/// frame of a very detailed one doesn't have to be waited for to find out.
+const HEAVY_TWEEN_RECORDS: usize = 1000;
+const HEAVY_FRAME_MS: f64 = 8.0;
+
+/// AQW build: how many frames an instance of a heavy tween remembers asking for (see
+/// `Warming`).
+const WARMING_KEPT: usize = 8;
+
+/// AQW build: only a tween of at most this many records gets in-betweens by how far it moves
+/// on screen (see `MorphShapeShared::travel_px_if_simple`): interface wipes, bars and timers
+/// (AQW's have 4 to 17; a 4-edge wipe takes 0.004 ms to tessellate). Those are up to 8
+/// in-betweens per frame for every copy on screen, and a crowd has slow tweens of hundreds of
+/// records in its weapons and effects too: those keep the steps their speed alone gives.
+/// (By size, not by timing each tessellation: two slow measurements on a busy PC would have
+/// switched a tween's in-betweens off for good.)
+const SIMPLE_TWEEN_RECORDS: usize = 32;
+
+/// AQW build: how many in-between tessellations of one tween are kept at most (see
+/// `MorphShapeShared::blended`).
+const IN_BETWEENS_KEPT: usize = 64;
+
 struct Frame {
-    shape_handle: Option<ShapeHandle>,
-    shape: swf::Shape,
+    /// (AQW build: with what it was tessellated for; the last used last. Up to
+    /// `SIZES_KEPT`: copies of a tween drawn at different sizes, e.g. an effect spawning many,
+    /// tessellated it again for each draw when only one was kept.)
+    shape_handles: Vec<(MadeFor, ShapeHandle)>,
+    shape: Arc<swf::Shape>,
     bounds: Rectangle<Twips>,
+    /// AQW build: a heavy tween's tessellations of this frame, instead of `shape_handles`
+    /// (see `MorphShapeShared::get_heavy_shape`).
+    cache: Option<Rc<RefCell<TessellationCache>>>,
+}
+
+/// AQW build: `RUFFLE_TRACE_TWEENS` (testing) logs where every shape tween is drawn, in every
+/// picture.
+fn trace_tweens() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RUFFLE_TRACE_TWEENS").is_some())
 }
 
 /// Data shared between all instances of a morph shape.
@@ -205,6 +332,29 @@ pub struct MorphShapeShared<'gc> {
 
     #[collect(require_static)]
     frames: RefCell<fnv::FnvHashMap<u16, Frame>>,
+    /// AQW build: the in-between ratios drawn with frame interpolation in this SWF frame or
+    /// the one before (with the frame each was last drawn in), most recent last. Kept apart
+    /// from `frames`, which keeps every ratio forever.
+    #[collect(require_static)]
+    blended: RefCell<Vec<(u16, MadeFor, ShapeHandle, u64)>>,
+    /// AQW build: in-between ratios in a row that were slow to tessellate (see
+    /// `SLOW_IN_BETWEENS`), and whether a slow real ratio was logged (see `get_shape`).
+    #[collect(require_static)]
+    slow_in_betweens: Cell<u8>,
+    #[collect(require_static)]
+    logged_slow_frame: Cell<bool>,
+    /// AQW build: whether a frame took long to tessellate, and whether it was logged that
+    /// the tween's frames are tessellated in the background (see `heavy`).
+    #[collect(require_static)]
+    slow_frames: Cell<bool>,
+    #[collect(require_static)]
+    logged_heavy: Cell<bool>,
+    /// AQW build: see `travel_px`.
+    #[collect(require_static)]
+    travel_px: std::cell::OnceCell<f32>,
+    /// AQW build: how its instances are moved on, for frame interpolation.
+    #[collect(require_static)]
+    rhythm: crate::display_object::interp::Rhythm,
 }
 
 impl<'gc> MorphShapeShared<'gc> {
@@ -214,6 +364,13 @@ impl<'gc> MorphShapeShared<'gc> {
             start: swf_tag.start.clone(),
             end: swf_tag.end.clone(),
             frames: RefCell::new(fnv::FnvHashMap::default()),
+            blended: RefCell::new(Vec::new()),
+            slow_in_betweens: Cell::new(0),
+            logged_slow_frame: Cell::new(false),
+            slow_frames: Cell::new(false),
+            logged_heavy: Cell::new(false),
+            travel_px: std::cell::OnceCell::new(),
+            rhythm: Default::default(),
             movie,
         }
     }
@@ -231,17 +388,308 @@ impl<'gc> MorphShapeShared<'gc> {
 
     /// Retrieves the `ShapeHandle` for the given ratio.
     /// Lazily initializes and tessellates the shape if it does not yet exist.
-    fn get_shape(&self, context: &mut RenderContext<'_, 'gc>, ratio: u16) -> ShapeHandle {
+    /// (AQW build: tessellated again when drawn at a scale too far from its tessellation's.)
+    fn get_shape(
+        &self,
+        context: &mut RenderContext<'_, 'gc>,
+        ratio: u16,
+        scale: Measure,
+    ) -> ShapeHandle {
         let mut frame = self.get_frame(ratio);
-        if let Some(handle) = frame.shape_handle.clone() {
-            handle
+        // The one made for the closest size, of those that fit.
+        if let Some(index) = frame
+            .shape_handles
+            .iter()
+            .enumerate()
+            .filter(|(_, (made_for, _))| made_for.fits(scale))
+            .min_by(|(_, (a, _)), (_, (b, _))| {
+                a.deviation(scale).total_cmp(&b.deviation(scale))
+            })
+            .map(|(index, _)| index)
+        {
+            let entry = frame.shape_handles.remove(index);
+            let handle = entry.1.clone();
+            frame.shape_handles.push(entry);
+            return handle;
+        }
+        let waited = context.renderer.waited_micros();
+        let started = Instant::now();
+        let library = context
+            .library
+            .library_for_movie(self.movie)
+            .unwrap();
+        let handle = context.renderer.register_shape_stretched(
+            (&*frame.shape).into(),
+            &MovieLibrarySource { library },
+            scale.scale,
+            scale.stretch,
+        );
+        let ms = work_ms(started, context.renderer.waited_micros() - waited);
+        if ms > HEAVY_FRAME_MS {
+            self.slow_frames.set(true);
+        }
+        if ms > SLOW_FRAME_MS && !self.logged_slow_frame.replace(true) {
+            tracing::info!(
+                target: "ruffle_aqw_perf",
+                "shape tween {} of {} ({} records): a frame took {:.1} ms to tessellate, for {:.0} px across",
+                self.id,
+                self.movie.url(),
+                self.start.shape.len(),
+                ms,
+                px_across(&frame.bounds, scale)
+            );
+        }
+        if frame.shape_handles.len() >= SIZES_KEPT {
+            frame.shape_handles.remove(0);
+        }
+        frame
+            .shape_handles
+            .push((MadeFor::now(scale), handle.clone()));
+        handle
+    }
+
+    /// AQW build: whether this tween's frames are tessellated in the background (see
+    /// `get_heavy_shape`).
+    fn heavy(&self) -> bool {
+        self.start.shape.len() > HEAVY_TWEEN_RECORDS || self.slow_frames.get()
+    }
+
+    /// AQW build: `get_shape` for a heavy tween (see `HEAVY_TWEEN_RECORDS`), for an instance
+    /// with the given `warming`. A player's cape and scythe had four tweens of about 4,700
+    /// records, 37 frames each, 22-32 ms a frame to tessellate: the first time their animation
+    /// played, every frame of it froze the game for 25-120 ms. So a frame of such a tween is
+    /// tessellated on the thread pool, like a detailed shape (`deferred_shapes`), and isn't
+    /// waited for. Until it's done the instance is drawn as it was last drawn, or as the
+    /// newest frame it asked for that has been finished since (without frame interpolation
+    /// every frame is asked for once per loop, so that's what moves it during its first
+    /// loop). Where that can't be (see `deferred_shapes::may_stand_in`), the frame's
+    /// placeholder is drawn, as for any shape: left out, waited for, or its cached object
+    /// redrawn when it's done. Outside a frame's render it's tessellated at once.
+    fn get_heavy_shape(
+        &self,
+        context: &mut RenderContext<'_, 'gc>,
+        warming: &RefCell<Warming>,
+        ratio: u16,
+        mut scale: Measure,
+    ) -> ShapeHandle {
+        let (shape, cache) = {
+            let mut frame = self.get_frame(ratio);
+            let cache = frame.cache.get_or_insert_with(TessellationCache::new_shared).clone();
+            (frame.shape.clone(), cache)
+        };
+        let found = cache.borrow_mut().find_near_and_touch(&mut scale);
+        let deferring = deferred_shapes::is_active();
+        let handle = match found {
+            Some(handle) if deferring || !deferred_shapes::is_placeholder(&handle) => handle,
+            found => {
+                let made = if deferring {
+                    if !self.logged_heavy.replace(true) {
+                        tracing::info!(
+                            target: "ruffle_aqw_perf",
+                            "shape tween {} of {} ({} records): its frames are tessellated in the background",
+                            self.id,
+                            self.movie.url(),
+                            self.start.shape.len()
+                        );
+                    }
+                    let (movie, shape) = (self.movie, shape.clone());
+                    deferred_shapes::queue(movie, shape, scale, cache.clone(), false)
+                } else {
+                    let library = context
+                        .library
+                        .library_for_movie(self.movie)
+                        .unwrap();
+                    context.renderer.register_shape_stretched(
+                        (&*shape).into(),
+                        &MovieLibrarySource { library },
+                        scale.scale,
+                        scale.stretch,
+                    )
+                };
+                let mut cache = cache.borrow_mut();
+                match found {
+                    // (Being made in the background, but this isn't a frame's render.)
+                    Some(placeholder) => cache.replace(&placeholder, Some(made.clone())),
+                    None => cache.insert(scale, made.clone()),
+                }
+                made
+            }
+        };
+
+        let mut warming = warming.borrow_mut();
+        if !deferred_shapes::is_placeholder(&handle) {
+            warming.pending.clear();
+            warming.last = Some(handle.clone());
+            return handle;
+        }
+        // The newest of the frames it asked for before that is done by now.
+        let done = warming.pending.iter().enumerate().rev().find_map(|(index, entry)| {
+            let mut measure = entry.1;
+            let found = entry.0.borrow_mut().find_near_and_touch(&mut measure);
+            found
+                .filter(|handle| !deferred_shapes::is_placeholder(handle))
+                .map(|handle| (index, handle))
+        });
+        if let Some((index, done)) = done {
+            warming.last = Some(done);
+            warming.pending.drain(..=index);
+        }
+        if !warming.pending.iter().any(|(pending, _)| Rc::ptr_eq(pending, &cache)) {
+            if warming.pending.len() >= WARMING_KEPT {
+                warming.pending.remove(0);
+            }
+            warming.pending.push((cache, scale));
+        }
+        match &warming.last {
+            Some(last) if deferred_shapes::may_stand_in() => last.clone(),
+            _ => handle,
+        }
+    }
+
+    /// AQW build: the `ShapeHandle` for an in-between ratio of frame interpolation, or `None`
+    /// if this tween is too slow to tessellate for that: it's then drawn at its real ratios,
+    /// which are kept for good (as in Flash, it changes shape once per frame; where it is and
+    /// its size are still blended). In-betweens depend on when the screen is drawn, so each
+    /// loop of a tween has new ones, and they aren't kept: another player's class effect took
+    /// 30-160 ms per in-between, on every picture of every loop (every 3-4 s, for a minute).
+    fn get_blended_shape(
+        &self,
+        context: &mut RenderContext<'_, 'gc>,
+        ratio: u16,
+        scale: Measure,
+    ) -> Option<ShapeHandle> {
+        // (A heavy tween's frames are tessellated in the background: it has none to spare
+        // for in-betweens, which aren't kept.)
+        if self.slow_in_betweens.get() >= SLOW_IN_BETWEENS || self.heavy() {
+            return None;
+        }
+        let swf_frame = crate::display_object::interp::frame();
+        if let Some(frame) = self.frames.borrow().get(&ratio)
+            && let Some((_, handle)) = frame
+                .shape_handles
+                .iter()
+                .rev()
+                .find(|(made_for, _)| made_for.fits(scale))
+        {
+            return Some(handle.clone());
+        }
+        let mut blended = self.blended.borrow_mut();
+        if let Some(index) = blended
+            .iter()
+            .position(|(r, made_for, _, _)| *r == ratio && made_for.fits(scale))
+        {
+            let mut entry = blended.remove(index);
+            entry.3 = swf_frame;
+            let handle = entry.2.clone();
+            blended.push(entry);
+            return Some(handle);
+        }
+        // Timed without the renderer's wait for the present thread before the upload, which
+        // at 360 Hz took up to 2.8 ms and made 4-record interface tweens look slow. (Not
+        // waited for first instead: the tessellation runs while that thread works.)
+        let waited = context.renderer.waited_micros();
+        let started = Instant::now();
+        let frame = self.build_morph_frame(ratio);
+        let library = context
+            .library
+            .library_for_movie(self.movie)
+            .unwrap();
+        let handle = context.renderer.register_shape_stretched(
+            (&*frame.shape).into(),
+            &MovieLibrarySource { library },
+            scale.scale,
+            scale.stretch,
+        );
+        let ms = work_ms(started, context.renderer.waited_micros() - waited);
+        if ms <= SLOW_IN_BETWEEN_MS {
+            self.slow_in_betweens.set(0);
         } else {
-            let library = context.library.library_for_movie(self.movie).unwrap();
-            let handle = context
-                .renderer
-                .register_shape((&frame.shape).into(), &MovieLibrarySource { library });
-            frame.shape_handle = Some(handle.clone());
-            handle
+            let slow = self.slow_in_betweens.get() + 1;
+            self.slow_in_betweens.set(slow);
+            if slow >= SLOW_IN_BETWEENS {
+                tracing::info!(
+                    target: "ruffle_aqw_perf",
+                    "shape tween {} of {} ({} records): {} in-betweens in a row took over {} ms to tessellate (the last {:.1} ms, for {:.0} px across), drawn at its real frames from now on",
+                    self.id,
+                    self.movie.url(),
+                    self.start.shape.len(),
+                    SLOW_IN_BETWEENS,
+                    SLOW_IN_BETWEEN_MS,
+                    ms,
+                    px_across(&frame.bounds, scale)
+                );
+                blended.clear();
+                return Some(handle);
+            }
+        }
+        // An in-between belongs to the frame it was made in: every copy of the tween on
+        // screen (the wipes of all skills cooling down, every aura's timer) has its own, a new
+        // one per step, and none is drawn again once its frame is over. So those not drawn in
+        // this frame or the last go, however many copies there are (the last 16 were kept
+        // before, which more copies than that would have tessellated again on every picture).
+        blended.retain(|entry| entry.3 + 1 >= swf_frame);
+        if blended.len() >= IN_BETWEENS_KEPT {
+            blended.remove(0);
+        }
+        blended.push((ratio, MadeFor::now(scale), handle.clone(), swf_frame));
+        Some(handle)
+    }
+
+    /// AQW build: how far the point of this tween that moves the most travels between its two
+    /// ends, in pixels at its own scale. Frame interpolation gives a tween in-betweens by how
+    /// far it moves on screen (see interp's `tween_steps`).
+    fn travel_px(&self) -> f32 {
+        *self.travel_px.get_or_init(|| {
+            use swf::ShapeRecord;
+            // Both ends have the same records in the same order (see `build_morph_frame`), so
+            // their pens move in step.
+            let (from, to) = (self.build_morph_frame(0), self.build_morph_frame(u16::MAX));
+            let (from, to) = (&from.shape.shape, &to.shape.shape);
+            let (mut from_x, mut from_y) = (Twips::ZERO, Twips::ZERO);
+            let (mut to_x, mut to_y) = (Twips::ZERO, Twips::ZERO);
+            let mut travel = 0.0f64;
+            let mut reach = |from_x: Twips, from_y: Twips, to_x: Twips, to_y: Twips| {
+                let moved = (to_x - from_x)
+                    .to_pixels()
+                    .hypot((to_y - from_y).to_pixels());
+                travel = travel.max(moved);
+            };
+            for (from, to) in from.iter().zip(to) {
+                // (A curve's control point moves too.)
+                if let (
+                    ShapeRecord::CurvedEdge {
+                        control_delta: from_control,
+                        ..
+                    },
+                    ShapeRecord::CurvedEdge {
+                        control_delta: to_control,
+                        ..
+                    },
+                ) = (from, to)
+                {
+                    reach(
+                        from_x + from_control.dx,
+                        from_y + from_control.dy,
+                        to_x + to_control.dx,
+                        to_y + to_control.dy,
+                    );
+                }
+                Self::update_pos(&mut from_x, &mut from_y, from);
+                Self::update_pos(&mut to_x, &mut to_y, to);
+                reach(from_x, from_y, to_x, to_y);
+            }
+            travel as f32
+        })
+    }
+
+    /// AQW build: `travel_px` for a simple tween, else 0: only a simple one gets in-betweens
+    /// for moving slowly but visibly (see `SIMPLE_TWEEN_RECORDS`). A detailed one keeps those
+    /// it gets for moving fast.
+    fn travel_px_if_simple(&self) -> f32 {
+        if self.start.shape.len() <= SIMPLE_TWEEN_RECORDS {
+            self.travel_px()
+        } else {
+            0.0
         }
     }
 
@@ -371,9 +819,10 @@ impl<'gc> MorphShapeShared<'gc> {
         };
 
         Frame {
-            shape_handle: None,
-            shape,
+            shape_handles: Vec::new(),
+            shape: Arc::new(shape),
             bounds,
+            cache: None,
         }
     }
 
@@ -399,6 +848,19 @@ impl<'gc> MorphShapeShared<'gc> {
             }
         }
     }
+}
+
+/// AQW build: the milliseconds of work since `started`, given the microseconds the renderer
+/// waited meanwhile (see `RenderBackend::waited_micros`).
+fn work_ms(started: Instant, waited_micros: u64) -> f64 {
+    (started.elapsed().as_secs_f64() * 1000.0 - waited_micros as f64 / 1000.0).max(0.0)
+}
+
+/// AQW build, for the perf log: how many pixels across (its larger side) a frame with these
+/// `bounds` is tessellated for. Detailed tweens drawn small cost the most to tessellate (see
+/// `Measure::at_least_min_size`, which tweens don't use).
+fn px_across(bounds: &Rectangle<Twips>, scale: Measure) -> f64 {
+    bounds.width().to_pixels().max(bounds.height().to_pixels()) * f64::from(scale.scale)
 }
 
 // Interpolation functions
@@ -640,5 +1102,89 @@ mod test {
             lerp_twips(Twips::new(-7), Twips::new(-7), a, b),
             Twips::new(-7)
         );
+    }
+
+    /// A 100 px wide rectangle of the given height (px), drawn clockwise from its top left.
+    fn wipe(height: f64) -> swf::MorphShape {
+        use swf::{PointDelta, ShapeRecord, StyleChangeData};
+        let bounds = Rectangle {
+            x_min: Twips::ZERO,
+            x_max: Twips::from_pixels(100.0),
+            y_min: Twips::ZERO,
+            y_max: Twips::from_pixels(height),
+        };
+        let edge = |dx: f64, dy: f64| ShapeRecord::StraightEdge {
+            delta: PointDelta::new(Twips::from_pixels(dx), Twips::from_pixels(dy)),
+        };
+        swf::MorphShape {
+            shape_bounds: bounds,
+            edge_bounds: bounds,
+            fill_styles: vec![swf::FillStyle::Color(Color::BLACK)],
+            line_styles: Vec::new(),
+            shape: vec![
+                ShapeRecord::StyleChange(Box::new(StyleChangeData {
+                    move_to: Some(Point::new(Twips::ZERO, Twips::ZERO)),
+                    fill_style_0: None,
+                    fill_style_1: Some(1),
+                    line_style: None,
+                    new_styles: None,
+                })),
+                edge(100.0, 0.0),
+                edge(0.0, height),
+                edge(-100.0, 0.0),
+                edge(0.0, -height),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_wipe_travels_as_far_as_its_edge_moves() {
+        // (A movie handle needs an arena.)
+        gc_arena::arena::rootless_mutate(|mc| {
+            let movie = SwfMovie::new(mc, crate::tag_utils::SwfMovieData::empty(10, None));
+            // A cooldown wipe: the bottom edge of a rectangle moves down by 58 px over the tween.
+            let tag = swf::DefineMorphShape {
+                version: 1,
+                id: 1,
+                flags: swf::DefineMorphShapeFlag::empty(),
+                start: wipe(2.0),
+                end: wipe(60.0),
+            };
+            let shared = MorphShapeShared::from_swf_tag(&tag, movie);
+            assert_eq!(shared.travel_px(), 58.0);
+            assert_eq!(shared.travel_px_if_simple(), 58.0);
+            // A detailed tween (here the same wipe, its top edge in 40 pieces) gets no in-betweens
+            // for moving slowly.
+            let detailed = |height: f64| {
+                let mut shape = wipe(height);
+                let top = shape.shape.remove(1);
+                let piece = swf::ShapeRecord::StraightEdge {
+                    delta: swf::PointDelta::new(Twips::from_pixels(2.5), Twips::ZERO),
+                };
+                assert!(matches!(top, swf::ShapeRecord::StraightEdge { .. }));
+                let rest = shape.shape.split_off(1);
+                shape.shape.extend(std::iter::repeat_n(piece, 40));
+                shape.shape.extend(rest);
+                shape
+            };
+            let detailed_tag = swf::DefineMorphShape {
+                version: 1,
+                id: 2,
+                flags: swf::DefineMorphShapeFlag::empty(),
+                start: detailed(2.0),
+                end: detailed(60.0),
+            };
+            let shared =
+                MorphShapeShared::from_swf_tag(&detailed_tag, movie);
+            assert_eq!(shared.travel_px(), 58.0);
+            assert_eq!(shared.travel_px_if_simple(), 0.0);
+            // A tween that only changes colour doesn't move.
+            let still = swf::DefineMorphShape {
+                start: wipe(60.0),
+                ..tag
+            };
+            let shared = MorphShapeShared::from_swf_tag(&still, movie);
+            assert_eq!(shared.travel_px(), 0.0);
+        });
     }
 }

@@ -61,36 +61,53 @@ impl CommandList {
 
     pub fn execute(self, handler: &mut impl CommandHandler) {
         for command in self.commands {
-            match command {
-                Command::RenderBitmap {
-                    bitmap,
-                    transform,
-                    smoothing,
-                    pixel_snapping,
-                    region,
-                } => handler.render_bitmap(bitmap, transform, smoothing, pixel_snapping, region),
-                Command::RenderShape { shape, transform } => handler.render_shape(shape, transform),
-                Command::RenderStage3D { bitmap, transform } => {
-                    handler.render_stage3d(bitmap, transform)
-                }
-                Command::DrawRect { color, matrix } => handler.draw_rect(color, matrix),
-                Command::DrawLine { color, matrix } => handler.draw_line(color, matrix),
-                Command::DrawLineRect { color, matrix } => handler.draw_line_rect(color, matrix),
-                Command::PushMask => handler.push_mask(),
-                Command::ActivateMask => handler.activate_mask(),
-                Command::DeactivateMask => handler.deactivate_mask(),
-                Command::PopMask => handler.pop_mask(),
-                Command::Blend(commands, blend_mode) => handler.blend(commands, blend_mode),
-                Command::RenderAlphaMask {
-                    maskee_commands,
-                    mask_commands,
-                } => handler.render_alpha_mask(maskee_commands, mask_commands),
-            }
+            command.dispatch(handler);
         }
     }
 
     pub fn drawing_mask(&self) -> bool {
         self.maskers_in_progress > 0
+    }
+
+    /// AQW build: how many masks are being drawn (see `maskers_in_progress`), to draw part of
+    /// a list again in the same state.
+    pub fn maskers(&self) -> u32 {
+        self.maskers_in_progress
+    }
+
+    pub fn set_maskers(&mut self, maskers: u32) {
+        self.maskers_in_progress = maskers;
+    }
+}
+
+impl Command {
+    /// Calls the `handler` method for this command (what `CommandList::execute` does for each).
+    pub fn dispatch(self, handler: &mut impl CommandHandler) {
+        match self {
+            Command::RenderBitmap {
+                bitmap,
+                transform,
+                smoothing,
+                pixel_snapping,
+                region,
+            } => handler.render_bitmap(bitmap, transform, smoothing, pixel_snapping, region),
+            Command::RenderShape { shape, transform } => handler.render_shape(shape, transform),
+            Command::RenderStage3D { bitmap, transform } => {
+                handler.render_stage3d(bitmap, transform)
+            }
+            Command::DrawRect { color, matrix } => handler.draw_rect(color, matrix),
+            Command::DrawLine { color, matrix } => handler.draw_line(color, matrix),
+            Command::DrawLineRect { color, matrix } => handler.draw_line_rect(color, matrix),
+            Command::PushMask => handler.push_mask(),
+            Command::ActivateMask => handler.activate_mask(),
+            Command::DeactivateMask => handler.deactivate_mask(),
+            Command::PopMask => handler.pop_mask(),
+            Command::Blend(commands, blend_mode) => handler.blend(commands, blend_mode),
+            Command::RenderAlphaMask {
+                maskee_commands,
+                mask_commands,
+            } => handler.render_alpha_mask(maskee_commands, mask_commands),
+        }
     }
 }
 

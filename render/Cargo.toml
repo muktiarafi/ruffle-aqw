@@ -15,6 +15,7 @@ ruffle_wstr = { path = "../wstr" }
 swf = { path = "../swf"}
 pixel_bender = { path = "pixel_bender"}
 tracing = { workspace = true }
+hashbrown = { workspace = true }
 gif = "0.14.2"
 png = { workspace = true }
 image = { workspace = true }

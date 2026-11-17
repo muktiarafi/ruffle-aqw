@@ -157,6 +157,11 @@ impl<'gc> TranslationUnit<'gc> {
         self.0.movie
     }
 
+    /// AQW build: a weak, type-erased handle, to tell whether this code is still in use.
+    pub fn downgrade_erased(self) -> gc_arena::GcWeak<'gc, ()> {
+        gc_arena::GcWeak::erase(Gc::downgrade(self.0))
+    }
+
     pub fn api_version(self, avm2: &Avm2<'gc>) -> ApiVersion {
         if self.domain().is_playerglobals_domain(avm2) {
             // FIXME: get this from the player version we're emulating

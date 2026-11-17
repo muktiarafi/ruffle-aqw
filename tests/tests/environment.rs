@@ -105,12 +105,17 @@ mod renderer {
         let adapter_info = descriptors.adapter.get_info();
         let name = format!("{}-{:?}", std::env::consts::OS, adapter_info.backend);
 
-        Some((
-            Box::new(NativeRenderInterface { name }),
-            Box::new(WgpuRenderBackend::new(descriptors, target).expect(
-                "WGPU Render backend creation must not fail, everything was checked ahead of time",
-            )),
-        ))
+        let backend = WgpuRenderBackend::new(descriptors, target).expect(
+            "WGPU Render backend creation must not fail, everything was checked ahead of time",
+        );
+        // AQW build: with `RUFFLE_RENDER_THREAD` set, the tests record their pictures on a
+        // render thread too (see `ruffle_render_wgpu::render_thread`).
+        let backend: Box<dyn RenderBackend> = if ruffle_render_wgpu::render_thread::enabled() {
+            Box::new(ruffle_render_wgpu::render_thread::ThreadedBackend::new(backend))
+        } else {
+            Box::new(backend)
+        };
+        Some((Box::new(NativeRenderInterface { name }), backend))
     }
 
     impl RenderInterface for NativeRenderInterface {
@@ -119,10 +124,12 @@ mod renderer {
         }
 
         fn capture(&self, backend: &mut dyn RenderBackend) -> RgbaImage {
-            let renderer =
-                <dyn Any>::downcast_mut::<WgpuRenderBackend<TextureTarget>>(backend).unwrap();
-
-            renderer.capture_frame().expect("Failed to capture image")
+            ruffle_render_wgpu::render_thread::with_wgpu_backend(
+                backend,
+                |renderer: &mut WgpuRenderBackend<TextureTarget>| renderer.capture_frame(),
+            )
+            .unwrap()
+            .expect("Failed to capture image")
         }
     }
 
@@ -147,10 +154,11 @@ mod renderer {
     */
 
     fn create_wgpu_device() -> Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
-        let instance =
-            create_wgpu_instance(wgpu::Backends::all(), wgpu::BackendOptions::default(), None);
+        // AQW build: `WGPU_BACKEND=vulkan|dx12` picks the graphics API for the image tests.
+        let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
+        let instance = create_wgpu_instance(backends, wgpu::BackendOptions::default(), None);
         futures::executor::block_on(request_adapter_and_device(
-            wgpu::Backends::all(),
+            backends,
             &instance,
             None,
             Default::default(),

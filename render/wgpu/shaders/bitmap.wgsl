@@ -6,6 +6,9 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
     @location(1) mult_color: vec4<f32>,
     @location(2) add_color: vec4<f32>,
+    // AQW build: how much of this pixel the shape covers (Flash-style edge smoothing, see the
+    // tessellator's `edge_aa`); `uv.z` carries it, 1 except in a shape's soft edge.
+    @location(3) coverage: f32,
 };
 
 @group(1) @binding(0) var<uniform> transforms: array<common__Transforms, max_transforms>;
@@ -16,7 +19,7 @@ override late_saturate: bool = false;
 @vertex
 fn main_vertex(in: common__VertexInputUv, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let pos = common__globals.global_matrix * (transforms[instanceIndex].world_matrix * vec4<f32>(in.position.x, in.position.y, 0.0, 1.0));
-    return VertexOutput(pos, in.uv.xy / in.uv.z, transforms[instanceIndex].mult_color, transforms[instanceIndex].add_color);
+    return VertexOutput(pos, in.uv.xy, transforms[instanceIndex].mult_color, transforms[instanceIndex].add_color, in.uv.z);
 }
 
 @fragment
@@ -35,5 +38,5 @@ fn main_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             color = saturate(color);
         }
     }
-    return color;
+    return color * in.coverage;
 }

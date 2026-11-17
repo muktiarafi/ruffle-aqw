@@ -8,6 +8,7 @@ use crate::font::{Font, FontDescriptor, FontLike, FontQuery, FontType};
 use crate::prelude::*;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
+use gc_arena::collect::Trace;
 use gc_arena::{Collect, Mutation};
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::bitmap::BitmapHandle;
@@ -19,18 +20,27 @@ use crate::font::DefaultFont;
 use fnv::{FnvHashMap, FnvHashSet};
 use std::collections::HashMap;
 
-#[derive(Clone, Collect)]
-#[collect(no_drop)]
+#[derive(Clone, Copy)]
 struct MovieSymbol<'gc>(SwfMovie<'gc>, CharacterId);
 
 /// The mappings between class objects and library characters defined by
 /// `SymbolClass`.
-#[derive(Collect)]
-#[collect(no_drop)]
 pub struct Avm2ClassRegistry<'gc> {
     /// A list of AVM2 class objects and the character IDs they are expected to
     /// instantiate.
     class_map: HashMap<Avm2Class<'gc>, MovieSymbol<'gc>>,
+}
+
+// AQW build: neither the class keys nor the movies are traced. The registry is only a lookup
+// table: a class stays alive through its domain/code (and a library symbol through its
+// character's `avm2_class`), and tracing them here kept every class of every SWF ever loaded
+// alive, which in turn kept those SWFs' code and libraries (stock Ruffle traces both and so
+// never frees a loaded movie). An entry whose class or movie wasn't reached is removed before
+// every sweep by `Library::sweep_movie_libraries`, so the map never holds a dangling pointer;
+// and a class that was reached keeps its movie's library, and with it the movie
+// (`Library::finalize_movie_libraries`).
+unsafe impl<'gc> Collect<'gc> for Avm2ClassRegistry<'gc> {
+    fn trace<C: Trace<'gc>>(&self, _cc: &mut C) {}
 }
 
 impl Default for Avm2ClassRegistry<'_> {
@@ -93,6 +103,9 @@ impl<'gc> Avm2ClassRegistry<'gc> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct MovieLibrary<'gc> {
+    /// AQW build: see `Library::finalize_movie_libraries`.
+    #[collect(require_static)]
+    aqw_gc: LibraryGcState,
     swf: SwfMovie<'gc>,
     characters: HashMap<CharacterId, Character<'gc>>,
     export_characters: Avm1PropertyMap<'gc, CharacterId>,
@@ -103,8 +116,14 @@ pub struct MovieLibrary<'gc> {
 }
 
 impl<'gc> MovieLibrary<'gc> {
+    /// AQW build: the movie this is the library of.
+    pub fn movie(&self) -> SwfMovie<'gc> {
+        self.swf
+    }
+
     pub fn new(swf: SwfMovie<'gc>) -> Self {
         Self {
+            aqw_gc: Default::default(),
             swf,
             characters: HashMap::new(),
             imported_assets: HashMap::new(),
@@ -366,34 +385,208 @@ impl ruffle_render::bitmap::BitmapSource for MovieLibrarySource<'_, '_> {
         match bitmap.bitmap_handle(backend) {
             Ok(handle) => Some(handle),
             Err(e) => {
-                tracing::error!("Failed to register bitmap character {id}: {e}");
+                tracing::error!(
+                    "Failed to register bitmap character {id} of {}: {e}",
+                    self.library.swf.url()
+                );
                 None
             }
         }
     }
 }
 
-#[derive(Collect)]
-#[collect(no_drop)]
-struct MovieLibraries<'gc>(HashMap<SwfMovie<'gc>, MovieLibrary<'gc>>);
+/// AQW build: per-library state for `Library::finalize_movie_libraries`.
+#[derive(Default)]
+struct LibraryGcState {
+    /// Not traced this cycle; freed at the end of marking unless found in use.
+    testing: std::cell::Cell<bool>,
+    /// Cycles to wait before testing again (doubles each time the library is found in use).
+    wait: std::cell::Cell<u16>,
+    backoff: std::cell::Cell<u16>,
+}
+
+/// AQW build: what the libraries' tests did so far (see `Library::sweep_movie_libraries`):
+/// tested, and of those found in use and revived. For the log and the load benchmark.
+struct LibraryGcCounts {
+    tested: std::sync::atomic::AtomicU64,
+    revived: std::sync::atomic::AtomicU64,
+}
+
+static LIBRARY_GC: LibraryGcCounts = LibraryGcCounts {
+    tested: std::sync::atomic::AtomicU64::new(0),
+    revived: std::sync::atomic::AtomicU64::new(0),
+};
+
+/// AQW build: (tested, revived) so far.
+pub fn library_gc_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (LIBRARY_GC.tested.load(Relaxed), LIBRARY_GC.revived.load(Relaxed))
+}
+
+/// AQW build: one in this many of the loaded libraries, and of their characters, is tested in
+/// a GC cycle (at least 64 libraries and 4,000 characters): `RUFFLE_LIBRARY_TEST_SHARE`,
+/// default 2; 0 = only ever 64 and 4,000, as it was.
+fn test_share() -> usize {
+    static SHARE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| {
+        let share = std::env::var("RUFFLE_LIBRARY_TEST_SHARE")
+            .ok()
+            .and_then(|share| share.trim().parse::<usize>().ok())
+            .unwrap_or(2);
+        if share == 0 { usize::MAX } else { share }
+    })
+}
+
+/// AQW build: the most GC cycles a library found in use waits for its next test (the wait
+/// doubles from 1): `RUFFLE_LIBRARY_MAX_WAIT`, default 1 (it was 63).
+fn max_wait() -> u16 {
+    static WAIT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var("RUFFLE_LIBRARY_MAX_WAIT")
+            .ok()
+            .and_then(|wait| wait.trim().parse::<u16>().ok())
+            .unwrap_or(1)
+            .clamp(1, 1023)
+    })
+}
+
+/// AQW build: something that keeps a movie's library in use while it is alive.
+pub struct MovieAnchor<'gc> {
+    anchor: gc_arena::GcWeak<'gc, ()>,
+    /// The movie's address (see `Library::movie_addr`).
+    movie: usize,
+}
+
+unsafe impl<'gc> Collect<'gc> for MovieAnchor<'gc> {
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        cc.trace_gc_weak(self.anchor);
+    }
+}
+
+impl<'gc> MovieAnchor<'gc> {
+    pub fn new(anchor: gc_arena::GcWeak<'gc, ()>, movie: SwfMovie<'gc>) -> Self {
+        Self {
+            anchor,
+            movie: Library::movie_addr(movie),
+        }
+    }
+
+    pub fn is_dead(&self, fc: &gc_arena::Finalization<'gc>) -> bool {
+        self.anchor.is_dead(fc)
+    }
+
+    pub fn movie_addr(&self) -> usize {
+        self.movie
+    }
+}
+
+/// Whether a library character is used by anything other than its library: the character
+/// itself is referenced, or (for display objects) the shared data its instances point to is.
+fn character_in_use<'gc>(fc: &gc_arena::Finalization<'gc>, character: &Character<'gc>) -> bool {
+    struct AnyAlive<'a, 'gc> {
+        fc: &'a gc_arena::Finalization<'gc>,
+        alive: bool,
+    }
+    impl<'gc> Trace<'gc> for AnyAlive<'_, 'gc> {
+        fn trace_gc(&mut self, gc: gc_arena::Gc<'gc, ()>) {
+            self.alive |= !gc_arena::Gc::is_dead(self.fc, gc);
+        }
+        fn trace_gc_weak(&mut self, _gc: gc_arena::GcWeak<'gc, ()>) {}
+    }
+    let mut check = AnyAlive { fc, alive: false };
+    character.trace(&mut check);
+    if check.alive {
+        return true;
+    }
+    let shared = match character {
+        Character::MovieClip(c) => c.aqw_shared(),
+        Character::Graphic(c) => c.aqw_shared(),
+        Character::EditText(c) => c.aqw_shared(),
+        Character::Text(c) => c.aqw_shared(),
+        Character::MorphShape(c) => c.aqw_shared(),
+        Character::Avm1Button(c) => c.aqw_shared(),
+        Character::Avm2Button(c) => c.aqw_shared(),
+        _ => return false,
+    };
+    !gc_arena::Gc::is_dead(fc, shared)
+}
+
+/// Marks every unmarked `Gc` traced through it as reachable again.
+struct Revive<'a, 'gc> {
+    fc: &'a gc_arena::Finalization<'gc>,
+    revived: bool,
+}
+
+impl<'gc> Trace<'gc> for Revive<'_, 'gc> {
+    fn trace_gc(&mut self, gc: gc_arena::Gc<'gc, ()>) {
+        if gc_arena::Gc::is_dead(self.fc, gc) {
+            gc_arena::Gc::resurrect(self.fc, gc);
+            self.revived = true;
+        }
+    }
+    fn trace_gc_weak(&mut self, _gc: gc_arena::GcWeak<'gc, ()>) {}
+}
+
+/// AQW build: by the movie's address (`Library::movie_addr`): a library holds its movie
+/// (`MovieLibrary::swf`), so an address in here is a live movie's, and a library can be found
+/// from a place that can't hold a `'gc` handle (see `Library::library_at`).
+struct MovieLibraries<'gc>(FnvHashMap<usize, MovieLibrary<'gc>>);
+
+unsafe impl<'gc> Collect<'gc> for MovieLibraries<'gc> {
+    #[inline]
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        for (_, val) in self.0.iter() {
+            // AQW build: libraries being tested this cycle are only kept if something else
+            // still uses them (`Library::finalize_movie_libraries`).
+            if !val.aqw_gc.testing.get() {
+                cc.trace(val);
+            }
+        }
+    }
+}
 
 impl<'gc> MovieLibraries<'gc> {
+    fn live_count(&self) -> usize {
+        self.0.len()
+    }
+
     fn new() -> Self {
-        Self(HashMap::new())
+        Self(FnvHashMap::default())
+    }
+
+    /// AQW build, for the perf log: how much decompressed SWF data the live movies hold:
+    /// (movies, distinct URLs, bytes of every movie, bytes counting each shared data buffer
+    /// once). AQW loads the same gear file once per player wearing it, so the gap between
+    /// the two byte counts and the URL count say what sharing the data would save.
+    fn movie_data_stats(&self) -> (usize, usize, u64, u64) {
+        let mut urls = fnv::FnvHashSet::default();
+        let mut buffers = fnv::FnvHashSet::default();
+        let (mut movies, mut total, mut distinct) = (0, 0u64, 0u64);
+        for library in self.0.values() {
+            let movie = library.swf;
+            movies += 1;
+            let bytes = movie.data().len() as u64;
+            total += bytes;
+            urls.insert(movie.url().to_owned());
+            if buffers.insert(movie.data().as_ptr() as usize) {
+                distinct += bytes;
+            }
+        }
+        (movies, urls.len(), total, distinct)
     }
 
     fn get(&self, key: SwfMovie<'gc>) -> Option<&MovieLibrary<'gc>> {
-        self.0.get(&key)
+        self.0.get(&Library::movie_addr(key))
     }
 
     fn get_or_insert_mut(&mut self, movie: SwfMovie<'gc>) -> &mut MovieLibrary<'gc> {
         self.0
-            .entry(movie)
+            .entry(Library::movie_addr(movie))
             .or_insert_with(|| MovieLibrary::new(movie))
     }
 
     fn known_movies(&self) -> impl Iterator<Item = SwfMovie<'gc>> {
-        self.0.keys().copied()
+        self.0.values().map(|library| library.swf)
     }
 }
 
@@ -428,6 +621,24 @@ pub struct Library<'gc> {
     /// A list of the symbols associated with specific AVM2 constructor
     /// prototypes.
     avm2_class_registry: Avm2ClassRegistry<'gc>,
+
+    /// AQW build: libraries freed so far, and the movies they belonged to, by address with
+    /// their URL (to report any later lookup, which would mean a library was freed while still
+    /// needed; an address is forgotten when a new library is made at it).
+    #[collect(require_static)]
+    aqw_freed: (usize, FnvHashMap<usize, String>),
+
+    /// AQW build: the next choice of libraries to test takes all of them (see
+    /// `sweep_movie_libraries`, `Player::free_unused_libraries_now`).
+    #[collect(require_static)]
+    aqw_test_all: std::cell::Cell<bool>,
+}
+
+impl<'gc> Library<'gc> {
+    /// AQW build, for the perf log: SWF movies with a live library (loaded, not yet freed).
+    pub fn loaded_movie_count(&self) -> usize {
+        self.movie_libraries.live_count()
+    }
 }
 
 impl<'gc> Library<'gc> {
@@ -441,15 +652,220 @@ impl<'gc> Library<'gc> {
             default_font_names: Default::default(),
             default_font_cache: Default::default(),
             avm2_class_registry: Default::default(),
+            aqw_freed: Default::default(),
+            aqw_test_all: Default::default(),
         }
     }
 
+    /// AQW build: the GC cycle that ends next picks every library for its test, whatever its
+    /// wait and the bounds (for "Free memory now").
+    pub fn test_all_libraries_next(&self) {
+        self.aqw_test_all.set(true);
+    }
+
+    /// AQW build: what a movie is named by where a `'gc` handle can't be kept (a thread-local,
+    /// a recording that outlives the render): its address. Only ever looked up through
+    /// `library_at`, never turned back into a pointer.
+    pub fn movie_addr(movie: SwfMovie<'_>) -> usize {
+        movie.as_ptr() as usize
+    }
+
+    /// AQW build: the library of the movie at this address (see `movie_addr`), if there is
+    /// one now. (If that movie is gone and a new one was loaded at the same address, this is
+    /// the new one's: whoever asks draws for something that is gone too.)
+    pub fn library_at(&self, addr: usize) -> Option<&MovieLibrary<'gc>> {
+        self.movie_libraries.0.get(&addr)
+    }
+
     pub fn library_for_movie(&self, movie: SwfMovie<'gc>) -> Option<&MovieLibrary<'gc>> {
-        self.movie_libraries.get(movie)
+        let library = self.movie_libraries.get(movie);
+        if library.is_none() {
+            self.report_freed_lookup(movie);
+        }
+        library
     }
 
     pub fn library_for_movie_mut(&mut self, movie: SwfMovie<'gc>) -> &mut MovieLibrary<'gc> {
+        if self.movie_libraries.get(movie).is_none() {
+            self.report_freed_lookup(movie);
+            // (A new library at this address from here on: a new movie's, or this one's
+            // again.)
+            self.aqw_freed.1.remove(&Self::movie_addr(movie));
+        }
         self.movie_libraries.get_or_insert_mut(movie)
+    }
+
+    /// AQW build: the sweep that follows the freeing of libraries is through: their movies
+    /// are gone, and their addresses can be given to new movies. A new movie of the same file
+    /// at such an address is not the freed one "still used" (that was reported once in a
+    /// session that freed 5,400 libraries: the same file loaded again).
+    pub fn forget_freed_addresses(&mut self) {
+        self.aqw_freed.1.clear();
+    }
+
+    /// AQW build: warns (a limited number of times) when a freed library is looked up again.
+    fn report_freed_lookup(&self, movie: SwfMovie<'gc>) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static REPORTED: AtomicU32 = AtomicU32::new(0);
+        if self
+            .aqw_freed
+            .1
+            .get(&Self::movie_addr(movie))
+            .is_some_and(|url| url == movie.url())
+            && REPORTED.fetch_add(1, Ordering::Relaxed) < 50
+        {
+            tracing::warn!(
+                target: "ruffle_aqw_perf",
+                "library of {} was freed but is still used",
+                movie.url()
+            );
+        }
+    }
+
+    /// AQW build, for the perf log: see `MovieLibraries::movie_data_stats`.
+    pub fn movie_data_stats(&self) -> (usize, usize, u64, u64) {
+        self.movie_libraries.movie_data_stats()
+    }
+
+    /// AQW build, for the perf log.
+    pub fn freed_movie_count(&self) -> usize {
+        self.aqw_freed.0
+    }
+
+    /// AQW build: frees the libraries of loaded SWFs that nothing uses anymore.
+    ///
+    /// A `MovieLibrary` holds its own movie (and its characters hold more), and stock Ruffle
+    /// traces every library: every SWF ever loaded stays in memory with all its shapes and
+    /// bitmaps (AQW loads hundreds of gear/icon SWFs per session). Now a few
+    /// libraries per GC cycle are not traced (`testing`); once marking is complete, a tested
+    /// library is kept (and revived) if
+    /// - an instance of one of its symbols is alive (it shares the symbol's shared data),
+    ///   or a character itself is referenced (fonts, bitmaps, binary data),
+    /// - a `LoaderInfo` of the movie is alive (also covers its root clip, which holds it),
+    /// - code from the movie is alive, or
+    /// - an AVM2 class linked to one of its symbols is alive, or
+    /// - the movie itself was reached from somewhere else (anything that holds a movie may ask
+    ///   for its library);
+    ///
+    /// otherwise it is removed before the sweep. Returns whether anything was revived (marking
+    /// must then continue, and this runs again).
+    pub fn finalize_movie_libraries(
+        &self,
+        fc: &gc_arena::Finalization<'gc>,
+        anchored: &mut FnvHashSet<usize>,
+    ) -> bool {
+        for (class, MovieSymbol(movie, _)) in self.avm2_class_registry.class_map.iter() {
+            if !class.is_dead(fc) {
+                anchored.insert(Self::movie_addr(*movie));
+            }
+        }
+        let mut revived = false;
+        for (addr, library) in self.movie_libraries.0.iter() {
+            if !library.aqw_gc.testing.get() {
+                continue;
+            }
+            let in_use = anchored.contains(addr)
+                || !library.swf.is_dead(fc)
+                || library
+                    .characters
+                    .values()
+                    .any(|c| character_in_use(fc, c));
+            LIBRARY_GC.tested.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if in_use {
+                LIBRARY_GC.revived.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                library.aqw_gc.testing.set(false);
+                let backoff = (library.aqw_gc.backoff.get() * 2 + 1).min(max_wait());
+                library.aqw_gc.backoff.set(backoff);
+                library.aqw_gc.wait.set(backoff);
+                let mut revive = Revive { fc, revived: false };
+                library.trace(&mut revive);
+                revived |= revive.revived;
+            }
+        }
+        revived
+    }
+
+    /// AQW build: the second half of `finalize_movie_libraries`, once nothing was revived:
+    /// removes the unused libraries and dead class registry keys, then picks the libraries to
+    /// test next cycle (the root movie and AVM1 movies are never freed).
+    pub fn sweep_movie_libraries(
+        &mut self,
+        fc: &gc_arena::Finalization<'gc>,
+        root_movie: SwfMovie<'gc>,
+    ) {
+        // (Before the libraries go: a movie that wasn't reached is one whose library does.)
+        self.avm2_class_registry
+            .class_map
+            .retain(|class, symbol| !class.is_dead(fc) && !symbol.0.is_dead(fc));
+
+        let dead: Vec<usize> = self
+            .movie_libraries
+            .0
+            .iter()
+            .filter(|(_, library)| library.aqw_gc.testing.get())
+            .map(|(addr, _)| *addr)
+            .collect();
+        if self.aqw_freed.1.len() > 4096 {
+            self.aqw_freed.1.clear();
+        }
+        for addr in dead {
+            if let Some(library) = self.movie_libraries.0.remove(&addr) {
+                self.aqw_freed.0 += 1;
+                // (Its movie wasn't reached, but nothing is swept yet: it can still be read.)
+                self.aqw_freed.1.insert(addr, library.swf.url().to_owned());
+            }
+        }
+
+        // Test a bounded amount per cycle: the tests themselves, and handing the libraries
+        // found in use back to the collector, happen in one go at the end of marking (2 us a
+        // library; what only they reach is marked over the next frames, see
+        // `Player::collect_garbage`).
+        //
+        // The bound was 64 libraries and 4,000 characters a cycle whatever was loaded, and a
+        // library found in use waited up to 63 cycles for its next test. A cycle takes 10 s:
+        // 384 tests a minute at most, and ten minutes before a library whose player has left is
+        // looked at again. In a boss fight where players keep changing gear the game loads 400
+        // libraries a minute: they piled up (4,091 alive after eight minutes, 194 freed, 2 GB
+        // of heap), and memory only ever grew. Now a share of what is loaded is tested every
+        // cycle (`test_share`), and the wait is short (`max_wait`). Measured in the load
+        // benchmark with 4,825 libraries (2 GB), all taken off the stage at once: as it was,
+        // 1,559 were still alive after 70 cycles; with half tested a cycle, 354 after 4 cycles
+        // and none after 8, and the longest step at a cycle's end 8 ms with all in use (it was
+        // 13 to 18 ms with 53 tested a cycle, before that step was taken apart).
+        const MAX_LIBRARIES: usize = 64;
+        const MAX_CHARACTERS: usize = 4000;
+        let share = test_share();
+        let loaded_characters: usize = self
+            .movie_libraries
+            .0
+            .values()
+            .map(|library| library.characters.len())
+            .sum();
+        let max_libraries = (self.movie_libraries.0.len() / share).max(MAX_LIBRARIES);
+        let max_characters = (loaded_characters / share).max(MAX_CHARACTERS);
+        let all = self.aqw_test_all.replace(false);
+        let (mut libraries, mut characters) = (0, 0);
+        for library in self.movie_libraries.0.values() {
+            let movie = library.swf;
+            if SwfMovie::ptr_eq(&movie, &root_movie) || !movie.is_action_script_3() {
+                continue;
+            }
+            let state = &library.aqw_gc;
+            if state.wait.get() > 0 && !all {
+                state.wait.set(state.wait.get() - 1);
+                continue;
+            }
+            if !all
+                && libraries > 0
+                && (libraries >= max_libraries
+                    || characters + library.characters.len() > max_characters)
+            {
+                continue;
+            }
+            state.testing.set(true);
+            libraries += 1;
+            characters += library.characters.len();
+        }
     }
 
     pub fn known_movies(&self) -> impl Iterator<Item = SwfMovie<'gc>> {
@@ -684,12 +1100,16 @@ impl<'gc> Library<'gc> {
         movie: Option<SwfMovie<'gc>>,
     ) -> Option<Font<'gc>> {
         let query = FontQuery::new(font_type, name.to_owned(), is_bold, is_italic);
-        if let Some(font) = self.global_fonts.find(&query) {
+        // AQW build: an exact match (name, bold, italic) anywhere comes before a fallback to
+        // another style. Global fonts were searched with fallbacks first, so once some AQW item
+        // registered "Arial" (regular) globally, text asking for embedded "Arial" in bold got the
+        // regular global one instead of the bold "Arial" embedded in the game itself: skill
+        // names turned thin in sessions where that item had loaded.
+        if let Some(font) = self.global_fonts.get(&query) {
             return Some(font);
         }
-        if let Some(movie) = movie
-            && let Some(library) = self.library_for_movie(movie)
-        {
+        let library = movie.and_then(|movie| self.library_for_movie(movie));
+        if let Some(library) = library {
             if let Some((_, font)) = library.character_by_export_name(&WString::from_utf8(name)) {
                 // Exporting a font seems to override font lookup completely.
                 return if let Character::Font(font) = font {
@@ -698,9 +1118,17 @@ impl<'gc> Library<'gc> {
                     None
                 };
             }
-            if let Some(font) = library.fonts.find(&query) {
+            if let Some(font) = library.fonts.get(&query) {
                 return Some(font);
             }
+        }
+        if let Some(font) = self.global_fonts.find(&query) {
+            return Some(font);
+        }
+        if let Some(library) = library
+            && let Some(font) = library.fonts.find(&query)
+        {
+            return Some(font);
         }
         None
     }
@@ -710,6 +1138,16 @@ impl<'gc> Library<'gc> {
     }
 
     pub fn register_global_font(&mut self, font: Font<'gc>) {
+        // AQW build: see `resolve_font` in html/layout.rs.
+        tracing::info!(
+            target: "ruffle_aqw_perf",
+            "global font registered: {:?} \"{}\" bold {} italic {}, has glyphs {}",
+            font.font_type(),
+            font.descriptor().name(),
+            font.descriptor().bold(),
+            font.descriptor().italic(),
+            font.has_glyphs()
+        );
         self.global_fonts.register(font);
     }
 

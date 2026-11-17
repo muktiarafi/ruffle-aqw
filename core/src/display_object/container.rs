@@ -1111,6 +1111,7 @@ impl<'gc> ChildContainer<'gc> {
     }
 
     fn render_list_mut(&mut self) -> &mut Vec<DisplayObject<'gc>> {
+        crate::display_object::replay::changed();
         Rc::make_mut(&mut self.render_list)
     }
 }

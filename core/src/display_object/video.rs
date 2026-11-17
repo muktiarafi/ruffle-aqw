@@ -520,6 +520,12 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     }
 
     fn render_with_options(self, context: &mut RenderContext<'_, 'gc>, options: RenderOptions) {
+        // AQW build: what a video draws changes with its stream, not with anything a display
+        // object is told: the branches it's in are walked every time (see
+        // `replay::lean_render`).
+        if let Some(recorder) = context.recorder.as_deref_mut() {
+            recorder.video();
+        }
         if !context.is_offscreen
             && !self
                 .world_bounds(BoundsMode::Engine)

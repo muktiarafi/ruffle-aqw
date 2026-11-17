@@ -72,6 +72,8 @@ pub enum FramePhase {
 #[instrument(level = "debug", skip_all)]
 pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
     let stage = context.stage;
+    // AQW build: settled marks only last for one frame (see `display_object::settle`).
+    crate::display_object::settle::new_frame();
 
     if !stage.movie().is_action_script_3() {
         return;
@@ -111,6 +113,9 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
     context.orphan_manager.cleanup_dead_orphans(context.gc());
 
     *context.frame_phase = FramePhase::Idle;
+    // AQW build: what the lean walks skipped (see `display_object::settle`).
+    crate::display_object::settle::frame_done();
+    crate::display_object::replay::lean_frame_done();
 }
 
 /// Like `run_all_phases_avm2`, but specialized for the "nested frame" triggered
@@ -130,6 +135,8 @@ pub fn run_inner_goto_frame<'gc>(
         // We skip the next `enter_frame` call, so that we will still run the framescripts
         // queued for our target frame.
         initial_clip.base().set_skip_next_enter_frame(true);
+        // AQW build: `enter_frame` has to come by again (see `display_object::settle`).
+        initial_clip.wake();
 
         return;
     }
@@ -203,6 +210,192 @@ fn run_frame_script_cleanup<'gc>(context: &mut UpdateContext<'gc>) {
         clip.set_has_pending_script(true);
         clip.set_last_queued_script_frame(None);
         clip.run_local_frame_scripts(context);
+    }
+}
+
+/// AQW build: the frame scripts of clips put on the stage between frames don't wait for the
+/// next frame.
+///
+/// Flash only draws after a frame. What an event between two frames puts on the stage (a
+/// timer, data from the server, a finished load, a click) has run its first frame's scripts
+/// by the time anybody sees it. Here a picture is drawn after every tick, and the tick handles
+/// those events after its frame (`Player::tick`), and with a fast screen there are many
+/// pictures between two frames: a clip made by such an event was drawn before its first frame
+/// script had run. AQW colours every colour-custom part of an avatar from that part's own
+/// first-frame script (`mcSetColor(this, "Trim", ...)`), so armour, hair, capes and helms
+/// showed in the colours they were drawn in, for up to a frame, whenever the game built them
+/// outside a frame (its load throttle is a timer).
+///
+/// So: once a clip was given a parent between frames, the frame scripts waiting on the stage
+/// are run when that event's code has returned (`Player::update`, and before a picture is
+/// drawn), before any picture. It is what a `gotoAndPlay` anywhere in that same code has
+/// always done (`run_inner_goto_frame` runs the whole stage's waiting frame scripts, as Flash
+/// does); a script that has run is not run again by the next frame. Clips that are not on the
+/// stage keep waiting, as before: their scripts mostly ask for the stage.
+///
+/// It is NOT the order Flash runs them in: Flash runs such a script in the next frame, after
+/// that frame's `enterFrame` and `frameConstructed` (the test `avm2/avm2_catchup_dobj` is
+/// Flash's own trace of it; `from_shumway/as3-loader/events/loader-events` shows Flash
+/// building a loaded movie inside a frame for the same reason). Running the next frame's
+/// script phase early is the price of drawing between frames at all. So it is off unless
+/// `RUFFLE_EARLY_SCRIPTS` is set: the desktop player sets it when AQW is played (a
+/// `no-early-scripts` file next to the exe, or `safe-drawing`, leaves it off), and the tests
+/// and other movies run in Flash's order.
+pub mod early_scripts {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// A display object was given a parent, or a frame script was set for a clip's
+        /// frame, at a time when the frame's own script phase will not come by it any more
+        /// (see `changed`).
+        static PARENTED: Cell<bool> = const { Cell::new(false) };
+        /// How often that mark was set, by the phase it was set in (Enter, Construct,
+        /// FrameScripts, Exit, Idle).
+        static MARKS: Cell<[u64; 5]> = const { Cell::new([0; 5]) };
+        /// Lines written about clips drawn before their script (see `drawn_waiting`).
+        static LINES: Cell<u64> = const { Cell::new(0) };
+        static RUNNING: Cell<bool> = const { Cell::new(false) };
+        /// (runs that found a script, scripts run in them, clips drawn with their script
+        /// still waiting)
+        static COUNTS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+        /// Every frame script run, early or not (for the offline proof in `aqw_bench`).
+        static ALL_SCRIPTS: Cell<u64> = const { Cell::new(0) };
+        /// (walks of the stage for waiting scripts, microseconds they took)
+        static WALKS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    }
+
+    /// For the log: what looking for waiting scripts costs: (walks of the stage, microseconds
+    /// in all), so far.
+    pub fn walks() -> (u64, u64) {
+        WALKS.get()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn all_scripts() -> u64 {
+        ALL_SCRIPTS.get()
+    }
+
+    /// Whether `run` has something to look at (asked before a picture is drawn: some code
+    /// between frames does not come through `Player::update`, a finished load for one).
+    pub fn waiting() -> bool {
+        PARENTED.get() && enabled()
+    }
+
+    pub fn enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("RUFFLE_EARLY_SCRIPTS").is_some())
+    }
+
+    /// A display object was given a parent, or a clip a script for the frame it is on. In
+    /// the first two phases of a frame the frame's script phase is still to come and walks
+    /// the whole stage. After that it may not come by any more: a script that makes clips
+    /// during the script phase (often inside the nested frame of a `gotoAndPlay`), an
+    /// `exitFrame` listener, and everything between frames.
+    #[inline]
+    pub fn changed(phase: super::FramePhase) {
+        use super::FramePhase;
+        if !matches!(phase, FramePhase::Enter | FramePhase::Construct) || RUNNING.get() {
+            if !PARENTED.replace(true) {
+                let index = match phase {
+                    FramePhase::Enter => 0,
+                    FramePhase::Construct => 1,
+                    FramePhase::FrameScripts => 2,
+                    FramePhase::Exit => 3,
+                    FramePhase::Idle => 4,
+                };
+                let mut marks = MARKS.get();
+                marks[index] += 1;
+                MARKS.set(marks);
+            }
+        }
+    }
+
+    /// For the log: how often the mark was set first in the script phase, the exit phase and
+    /// between frames.
+    pub fn marks() -> (u64, u64, u64) {
+        let marks = MARKS.get();
+        (marks[2], marks[3], marks[4])
+    }
+
+    /// A frame script is about to run.
+    #[inline]
+    pub fn script() {
+        ALL_SCRIPTS.set(ALL_SCRIPTS.get() + 1);
+        if RUNNING.get() {
+            COUNTS.with(|c| {
+                let (runs, scripts, drawn) = c.get();
+                c.set((runs, scripts + 1, drawn));
+            });
+        }
+    }
+
+    /// A clip is drawn while a frame script of its current frame has yet to run. Returns
+    /// whether to write a line about it: the first sixty, then one in two thousand.
+    pub fn drawn_waiting() -> bool {
+        let drawn = COUNTS.with(|c| {
+            let (runs, scripts, drawn) = c.get();
+            c.set((runs, scripts, drawn + 1));
+            drawn + 1
+        });
+        if !enabled() {
+            return false;
+        }
+        let lines = LINES.get();
+        if lines < 60 || drawn % 2000 == 0 {
+            LINES.set(lines + 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the mark is set (for those lines).
+    pub fn marked() -> bool {
+        PARENTED.get()
+    }
+
+    /// For the log: (runs that found a script, scripts run early, clips drawn with their
+    /// script still waiting), so far.
+    pub fn counts() -> (u64, u64, u64) {
+        COUNTS.get()
+    }
+
+    /// Called when code that ran between frames has returned.
+    pub fn run(context: &mut crate::context::UpdateContext<'_>) {
+        use super::FramePhase;
+        if *context.frame_phase != FramePhase::Idle || !PARENTED.replace(false) || !enabled() {
+            return;
+        }
+        let stage = context.stage;
+        if !crate::display_object::TDisplayObject::movie(stage).is_action_script_3() {
+            return;
+        }
+        let before = COUNTS.get().1;
+        let started = std::time::Instant::now();
+        let mut walks = 0;
+        RUNNING.set(true);
+        // (A script run here can put more clips on the stage: a few rounds, and what is left
+        // then waits for the frame.)
+        for _ in 0..4 {
+            walks += 1;
+            *context.frame_phase = FramePhase::FrameScripts;
+            crate::display_object::TDisplayObject::run_frame_scripts(stage, context);
+            super::run_frame_script_cleanup(context);
+            *context.frame_phase = FramePhase::Idle;
+            if !PARENTED.replace(false) {
+                break;
+            }
+        }
+        RUNNING.set(false);
+        PARENTED.set(false);
+        let (all_walks, micros) = WALKS.get();
+        WALKS.set((all_walks + walks, micros + started.elapsed().as_micros() as u64));
+        if COUNTS.get().1 != before {
+            COUNTS.with(|c| {
+                let (runs, scripts, drawn) = c.get();
+                c.set((runs + 1, scripts, drawn));
+            });
+        }
     }
 }
 

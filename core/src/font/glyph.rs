@@ -5,7 +5,10 @@ use crate::prelude::*;
 use ruffle_render::backend::null::NullBitmapSource;
 use ruffle_render::backend::{RenderBackend, ShapeHandle};
 use ruffle_render::transform::Transform;
+use crate::tessellation_cache::TessellationCache;
+use ruffle_render::tessellator::{EdgeMode, edge_mode};
 use std::cell::{Ref, RefCell};
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 enum SwfGlyphOrShape {
@@ -13,26 +16,56 @@ enum SwfGlyphOrShape {
     Shape {
         shape: swf::Shape,
         // Handle to registered shape, loaded lazily on first render of this glyph.
-        handle: Option<ShapeHandle>,
+        // (AQW build: with the edge mode it was tessellated for.)
+        handle: Option<(EdgeMode, ShapeHandle)>,
+        /// AQW build: tessellations at the sizes it's drawn, with Flash-style edges (see
+        /// `Glyph::render`).
+        scaled: Option<Rc<RefCell<TessellationCache>>>,
     },
     Poisoned,
 }
 
 impl SwfGlyphOrShape {
-    fn shape(&mut self) -> (&mut swf::Shape, &mut Option<ShapeHandle>) {
+    fn shape(&mut self) -> (&mut swf::Shape, &mut Option<(EdgeMode, ShapeHandle)>) {
         if let Self::Glyph(_) = self
             && let Self::Glyph(glyph) = core::mem::replace(self, Self::Poisoned)
         {
             *self = Self::Shape {
                 shape: ruffle_render::shape_utils::swf_glyph_to_shape(glyph),
                 handle: None,
+                scaled: None,
             };
         }
 
         match self {
-            SwfGlyphOrShape::Shape { shape, handle } => (shape, handle),
+            SwfGlyphOrShape::Shape { shape, handle, .. } => (shape, handle),
             _ => unreachable!(),
         }
+    }
+
+    /// AQW build: the tessellation for drawing at about `scale` (screen pixels per glyph unit).
+    fn scaled_handle(
+        &mut self,
+        renderer: &mut dyn RenderBackend,
+        mut scale: crate::tessellation_cache::Measure,
+    ) -> ShapeHandle {
+        self.shape();
+        let SwfGlyphOrShape::Shape { shape, scaled, .. } = self else {
+            unreachable!()
+        };
+        let cache = scaled.get_or_insert_with(TessellationCache::new_shared);
+        let mut cache = cache.borrow_mut();
+        if let Some(handle) = cache.find_near_and_touch(&mut scale) {
+            return handle;
+        }
+        let handle = renderer.register_shape_stretched(
+            (&*shape).into(),
+            &NullBitmapSource,
+            scale.scale,
+            scale.stretch,
+        );
+        cache.insert(scale, handle.clone());
+        handle
     }
 }
 
@@ -83,10 +116,12 @@ impl GlyphShape {
             GlyphShape::Swf(glyph) => {
                 let mut glyph = glyph.borrow_mut();
                 let (shape, handle) = glyph.shape();
-                handle.get_or_insert_with(|| {
-                    renderer.register_shape((&*shape).into(), &NullBitmapSource)
-                });
-                handle.clone().map(GlyphRenderData::from_shape)
+                let mode = edge_mode();
+                if !handle.as_ref().is_some_and(|(made_for, _)| *made_for == mode) {
+                    let new = renderer.register_shape((&*shape).into(), &NullBitmapSource);
+                    *handle = Some((mode, new));
+                }
+                handle.as_ref().map(|(_, handle)| GlyphRenderData::from_shape(handle.clone()))
             }
             GlyphShape::Drawing(drawing) => drawing
                 .register_or_replace(renderer)
@@ -181,11 +216,36 @@ impl Glyph {
     }
 
     pub fn renderable<'gc>(&self, context: &mut RenderContext<'_, 'gc>) -> bool {
+        // AQW build: an SWF glyph always has a shape (no need to tessellate it at scale 1 to
+        // know; with Flash-style edges it's drawn from tessellations at its size).
+        if matches!(self.shape, GlyphShape::Swf(_)) {
+            return true;
+        }
         self.glyph_render_data(context.renderer).is_some()
     }
 
     pub fn render<'gc>(&self, context: &mut RenderContext<'_, 'gc>) {
         use ruffle_render::commands::CommandHandler;
+
+        // AQW build: with Flash-style edges, a glyph is tessellated at the size it's drawn: its
+        // shape is in font units (~100x the screen size), so a tessellation made at scale 1
+        // gets soft edges ~1/100 of a pixel wide (aliased, bold-looking text).
+        if ruffle_render::tessellator::edge_aa() {
+            match &self.shape {
+                GlyphShape::Swf(glyph) => {
+                    let transform = context.transform_stack.transform();
+                    let scale = crate::tessellation_cache::Measure::of(&transform.matrix);
+                    let handle = glyph.borrow_mut().scaled_handle(context.renderer, scale);
+                    context.commands.render_shape(handle, transform);
+                    return;
+                }
+                GlyphShape::Drawing(drawing) => {
+                    drawing.render(context);
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         let Some(render_data) = self.glyph_render_data(context.renderer) else {
             return;

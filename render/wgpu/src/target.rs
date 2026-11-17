@@ -12,6 +12,11 @@ pub trait RenderTargetFrame: Debug {
     fn view(&self) -> &wgpu::TextureView;
 }
 
+/// AQW build: submits a frame's command buffers, from any thread (see
+/// `RenderTarget::submit_later`).
+pub type LaterSubmit =
+    Box<dyn FnOnce(&wgpu::Queue, Vec<wgpu::CommandBuffer>) -> wgpu::SubmissionIndex + Send>;
+
 pub trait RenderTarget: Debug + 'static {
     type Frame: RenderTargetFrame;
 
@@ -35,6 +40,12 @@ pub trait RenderTarget: Debug + 'static {
         command_buffers: I,
         frame: Self::Frame,
     ) -> wgpu::SubmissionIndex;
+
+    /// AQW build: what submits `frame`, from another thread (see `crate::present`), or the
+    /// frame back when this target can only `submit` on this thread (the default).
+    fn submit_later(&self, frame: Self::Frame) -> Result<LaterSubmit, Self::Frame> {
+        Err(frame)
+    }
 }
 
 #[derive(Debug)]

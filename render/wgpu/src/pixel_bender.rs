@@ -482,13 +482,15 @@ pub(super) fn run_pixelbender_shader_impl(
                         );
 
                         BitmapHandle(Arc::new(Texture {
-                            view: fresh_texture.create_view(&Default::default()),
+                            live: None,
                             texture: fresh_texture,
                             repeating_linear: Default::default(),
                             repeating_nearest: Default::default(),
                             clamped_linear: Default::default(),
                             clamped_nearest: Default::default(),
                             copy_count: Cell::new(0),
+                            id: Texture::new_id(),
+                            version: Default::default(),
                         }))
                     });
                     *texture = Some(cached_fresh_handle.clone().into());
@@ -646,6 +648,7 @@ pub(super) fn run_pixelbender_shader_impl(
 
     let pipeline = compiled_shader.get_pipeline(descriptors, sample_count, target.format());
 
+    crate::perf_counters::inc(crate::perf_counters::RENDER_PASS);
     let mut render_pass = render_command_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("PixelBender render pass"),
         color_attachments: &[color_attachment],
@@ -657,11 +660,11 @@ pub(super) fn run_pixelbender_shader_impl(
 
     render_pass.set_vertex_buffer(0, vertices.slice(..));
     render_pass.set_index_buffer(
-        descriptors.quad.index_buffer.slice(..),
+        descriptors.quad.indices.slice(..),
         wgpu::IndexFormat::Uint32,
     );
 
-    render_pass.draw_indexed(descriptors.quad.indices_quad.clone(), 0, 0..1);
+    render_pass.draw_indexed(0..6, 0, 0..1);
 
     // Note - we just drop the staging belt, instead of recalling it,
     // since we're not going to use it again.

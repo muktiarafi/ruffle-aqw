@@ -242,6 +242,11 @@ impl<'gc> ClassData<'gc> {
 }
 
 impl<'gc> Class<'gc> {
+    /// AQW build: whether this class is unreachable (only valid during finalization).
+    pub fn is_dead(self, fc: &gc_arena::Finalization<'gc>) -> bool {
+        Gc::is_dead(fc, self.0)
+    }
+
     pub fn as_ptr(self) -> *const () {
         Gc::as_ptr(self.0).cast()
     }

@@ -4,11 +4,12 @@ use crate::avm2::Avm2;
 use crate::avm2::activation::Activation;
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::globals::slots::flash_events_event_dispatcher as slots;
+use crate::avm2::object::FunctionObjectData;
 use crate::avm2::object::{EventObject, FunctionObject, Object, TObject as _};
 use crate::display_object::TDisplayObject;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
-use gc_arena::Collect;
+use gc_arena::{Collect, Gc, GcWeak, Mutation};
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
@@ -220,8 +221,13 @@ impl<'gc> DispatchList<'gc> {
         priority: i32,
         handler: FunctionObject<'gc>,
         use_capture: bool,
+        use_weak_reference: bool,
     ) {
-        let new_handler = EventHandler::new(handler, use_capture);
+        let new_handler = EventHandler::new(handler, use_capture, use_weak_reference);
+        // Drop weak listeners whose closure (and so receiver) has been collected.
+        for set in self.get_event_mut(event).values_mut() {
+            set.retain(|h| !h.handler.is_dropped());
+        }
 
         if let Some(event_sheaf) = self.get_event(event) {
             for other_set in event_sheaf.values() {
@@ -245,7 +251,7 @@ impl<'gc> DispatchList<'gc> {
         handler: FunctionObject<'gc>,
         use_capture: bool,
     ) {
-        let old_handler = EventHandler::new(handler, use_capture);
+        let old_handler = EventHandler::new(handler, use_capture, false);
 
         for set in self.get_event_mut(event).values_mut() {
             if let Some(pos) = set.iter().position(|h| *h == old_handler) {
@@ -254,11 +260,26 @@ impl<'gc> DispatchList<'gc> {
         }
     }
 
+    /// AQW build (pick-log diagnostic): this event's listeners in both phases, as (alive, weak
+    /// ones whose function has been collected).
+    pub fn aqw_listener_counts(&self, event: AvmString<'gc>) -> (usize, usize) {
+        self.get_event(event)
+            .into_iter()
+            .flat_map(|sheaf| sheaf.values().flatten())
+            .fold((0, 0), |(alive, collected), h| {
+                if h.handler.is_dropped() {
+                    (alive, collected + 1)
+                } else {
+                    (alive + 1, collected)
+                }
+            })
+    }
+
     /// Determine if there are any event listeners in this dispatch list.
     pub fn has_event_listener(&self, event: AvmString<'gc>) -> bool {
         if let Some(event_sheaf) = self.get_event(event) {
             for set in event_sheaf.values() {
-                if !set.is_empty() {
+                if set.iter().any(|h| !h.handler.is_dropped()) {
                     return true;
                 }
             }
@@ -279,13 +300,14 @@ impl<'gc> DispatchList<'gc> {
         &'a mut self,
         event: AvmString<'gc>,
         use_capture: bool,
+        mc: &'a Mutation<'gc>,
     ) -> impl 'a + Iterator<Item = FunctionObject<'gc>> {
         self.get_event_mut(event)
             .iter()
             .rev()
             .flat_map(|(_p, v)| v.iter())
             .filter(move |eh| eh.use_capture == use_capture)
-            .map(|eh| eh.handler)
+            .filter_map(move |eh| eh.handler.get(mc))
     }
 }
 
@@ -295,12 +317,58 @@ impl Default for DispatchList<'_> {
     }
 }
 
+/// How a dispatch list holds a listener.
+#[derive(Clone, Copy, Collect)]
+#[collect(no_drop)]
+enum ListenerRef<'gc> {
+    Strong(FunctionObject<'gc>),
+    /// `useWeakReference` (AQW build), as in Flash: the listener no longer keeps its function
+    /// alive. Ruffle caches method closures on their receiver, so a weak method listener works
+    /// exactly as long as its object is alive; an anonymous closure only lives while something
+    /// else references it. Previously Ruffle ignored `useWeakReference`, so e.g. avatars that
+    /// registered weak listeners on long-lived objects were never collected and kept running
+    /// off-screen.
+    Weak(GcWeak<'gc, FunctionObjectData<'gc>>),
+}
+
+impl<'gc> ListenerRef<'gc> {
+    fn ptr(&self) -> *const FunctionObjectData<'gc> {
+        match self {
+            Self::Strong(f) => Gc::as_ptr(f.0),
+            Self::Weak(w) => w.as_ptr(),
+        }
+    }
+
+    fn is_dropped(&self) -> bool {
+        matches!(self, Self::Weak(w) if w.is_dropped())
+    }
+
+    fn get(&self, mc: &Mutation<'gc>) -> Option<FunctionObject<'gc>> {
+        match self {
+            Self::Strong(f) => Some(*f),
+            Self::Weak(w) => w.upgrade(mc).map(FunctionObject),
+        }
+    }
+}
+
+/// `useWeakReference` registrations of method closures (AQW build perf log).
+pub static WEAK_LISTENERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// `useWeakReference` registrations of anonymous closures (AQW build perf log).
+pub static WEAK_ANON_LISTENERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `RUFFLE_STRONG_ANON_LISTENERS` keeps weakly-registered anonymous closures strong (the
+/// previous behavior), in case content turns out to depend on them surviving.
+fn weak_anonymous_listeners() -> bool {
+    static WEAK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WEAK.get_or_init(|| std::env::var_os("RUFFLE_STRONG_ANON_LISTENERS").is_none())
+}
+
 /// A single instance of an event handler.
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 struct EventHandler<'gc> {
     /// The event handler to call.
-    handler: FunctionObject<'gc>,
+    handler: ListenerRef<'gc>,
 
     /// Indicates if this handler should only be called for capturing events
     /// (when `true`), or if it should only be called for bubbling and
@@ -309,7 +377,21 @@ struct EventHandler<'gc> {
 }
 
 impl<'gc> EventHandler<'gc> {
-    fn new(handler: FunctionObject<'gc>, use_capture: bool) -> Self {
+    fn new(handler: FunctionObject<'gc>, use_capture: bool, use_weak_reference: bool) -> Self {
+        let bound = handler.is_bound_method();
+        if use_weak_reference {
+            let counter = if bound {
+                &WEAK_LISTENERS
+            } else {
+                &WEAK_ANON_LISTENERS
+            };
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let handler = if use_weak_reference && (bound || weak_anonymous_listeners()) {
+            ListenerRef::Weak(Gc::downgrade(handler.0))
+        } else {
+            ListenerRef::Strong(handler)
+        };
         Self {
             handler,
             use_capture,
@@ -319,8 +401,11 @@ impl<'gc> EventHandler<'gc> {
 
 impl PartialEq for EventHandler<'_> {
     fn eq(&self, rhs: &Self) -> bool {
+        // A dropped weak listener matches nothing: its address may have been reused.
         self.use_capture == rhs.use_capture
-            && std::ptr::eq(self.handler.as_ptr(), rhs.handler.as_ptr())
+            && !self.handler.is_dropped()
+            && !rhs.handler.is_dropped()
+            && std::ptr::eq(self.handler.ptr(), rhs.handler.ptr())
     }
 }
 
@@ -329,7 +414,7 @@ impl Eq for EventHandler<'_> {}
 impl Hash for EventHandler<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.use_capture.hash(state);
-        self.handler.as_ptr().hash(state);
+        self.handler.ptr().hash(state);
     }
 }
 
@@ -380,7 +465,7 @@ fn dispatch_event_to_target<'gc>(
     let handlers: Vec<FunctionObject<'gc>> = dispatch_list
         .as_dispatch_mut(activation.gc())
         .expect("Internal dispatch list is missing during dispatch!")
-        .iter_event_handlers(name, use_capture)
+        .iter_event_handlers(name, use_capture, activation.gc())
         .collect();
 
     if !handlers.is_empty() {
@@ -405,6 +490,17 @@ fn dispatch_event_to_target<'gc>(
         let result = handler.call(activation, global.into(), FunctionArgs::from_slice(args));
         if let Err(err) = result {
             let event_name = event.event().event_type();
+
+            // AQW build (diagnostic): say whose listener failed and which SWF it came from.
+            if let Some(object) = current_target.as_display_object() {
+                tracing::warn!(
+                    target: "ruffle_core::avm2",
+                    "failing \"{event_name}\" listener on {} '{}' from {}",
+                    current_target.instance_class().name().local_name(),
+                    object.name().map(|n| n.to_string()).unwrap_or_default(),
+                    object.movie().url()
+                );
+            }
 
             Avm2::uncaught_error(
                 activation,

@@ -1471,6 +1471,7 @@ pub fn draw<'gc>(
     let mut cache_draws = vec![];
     let mut render_context = RenderContext {
         renderer: context.renderer,
+        recorder: None,
         commands: CommandList::new(),
         cache_draws: &mut cache_draws,
         gc_context: context.gc_context,
@@ -1542,6 +1543,74 @@ pub fn draw<'gc>(
         commands
     };
 
+    // AQW build: a small bitmap's sharp copy gets the same draw, as much larger as the copy
+    // is (see `bitmap_data::Sharp`): the display object is walked a second time into commands
+    // of that scale. (Before `target` is borrowed: the object may show `target` itself.)
+    let sharp = match (&source, target.sharp_scale(&context.stage.view_matrix())) {
+        (IBitmapDrawable::DisplayObject(object), Some(scale)) => {
+            let sharp_transform = Transform {
+                matrix: Matrix::scale(scale.0, scale.1) * transform.matrix,
+                ..transform.clone()
+            };
+            let mut transform_stack = ruffle_render::transform::TransformStack::new();
+            transform_stack.push(&sharp_transform);
+            let mut cache_draws = vec![];
+            let mut render_context = RenderContext {
+                renderer: context.renderer,
+                recorder: None,
+                commands: CommandList::new(),
+                cache_draws: &mut cache_draws,
+                gc_context: context.gc_context,
+                library: context.library,
+                ui: context.ui,
+                transform_stack: &mut transform_stack,
+                is_offscreen: true,
+                use_bitmap_cache: false,
+                stage: context.stage,
+            };
+            // (The clip rectangle is in the bitmap's pixels: larger with the copy.)
+            let clip_mat = clip_rect.as_ref().map(|clip_rect| Matrix {
+                a: (clip_rect.x_max - clip_rect.x_min).to_pixels() as f32 * scale.0,
+                b: 0.0,
+                c: 0.0,
+                d: (clip_rect.y_max - clip_rect.y_min).to_pixels() as f32 * scale.1,
+                tx: Twips::from_pixels(clip_rect.x_min.to_pixels() * f64::from(scale.0)),
+                ty: Twips::from_pixels(clip_rect.y_min.to_pixels() * f64::from(scale.1)),
+            });
+            if let Some(clip_mat) = clip_mat {
+                render_context.commands.push_mask();
+                render_context
+                    .commands
+                    .draw_rect(swf::Color::BLACK, clip_mat);
+                render_context.commands.activate_mask();
+            }
+            let options = RenderOptions {
+                apply_transform: false,
+                ..Default::default()
+            };
+            object.render_with_options(&mut render_context, options);
+            if let Some(clip_mat) = clip_mat {
+                render_context.commands.deactivate_mask();
+                render_context
+                    .commands
+                    .draw_rect(swf::Color::BLACK, clip_mat);
+                render_context.commands.pop_mask();
+            }
+            let commands = if blend_mode == BlendMode::Normal {
+                render_context.commands
+            } else {
+                let mut commands = CommandList::new();
+                commands.blend(
+                    render_context.commands,
+                    RenderBlendMode::Builtin(blend_mode),
+                );
+                commands
+            };
+            Some((commands, scale))
+        }
+        _ => None,
+    };
+
     let (target, include_dirty_area) = target.overwrite_cpu_pixels_from_gpu(context.gc());
     let mut write = target.borrow_mut(context.gc());
     // If we have another dirty area to preserve, expand this to include it
@@ -1553,6 +1622,8 @@ pub fn draw<'gc>(
         cache_draws.is_empty(),
         "BitmapData.draw() should not use cacheAsBitmap"
     );
+    // AQW build: (`set_gpu_dirty` ends a sharp copy; this draw is one it can follow.)
+    let sharp = sharp.map(|(commands, scale)| (commands, scale, write.take_sharp()));
     let image = context
         .renderer
         .render_offscreen(handle, commands, quality, dirty_region);
@@ -1560,6 +1631,9 @@ pub fn draw<'gc>(
     match image {
         Some(sync_handle) => {
             write.set_gpu_dirty(context.gc(), sync_handle, dirty_region);
+            if let Some((commands, scale, was)) = sharp {
+                write.draw_sharp(context.gc(), context.renderer, was, scale, commands, quality);
+            }
             Ok(())
         }
         None => Err(BitmapDataDrawError::Unimplemented),

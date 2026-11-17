@@ -97,6 +97,11 @@ fn remove_child_from_displaylist<'gc>(
     child: DisplayObject<'gc>,
 ) -> Result<(), Error<'gc>> {
     if child.being_removed_by_avm2() {
+        // AQW build: let through for AQW (see `crate::forgiving_removal`); the removal under
+        // way takes the child out once its events are done.
+        if crate::forgiving_removal() {
+            return Ok(());
+        }
         return Err(make_error_2094(activation));
     }
 

@@ -276,6 +276,10 @@ impl<'gc> Stage<'gc> {
     /// This setting is currently ignored in Ruffle.
     /// Used by AVM1 `stage.quality` and AVM2 `Stage.quality` properties.
     pub fn set_quality(self, context: &mut UpdateContext<'gc>, quality: StageQuality) {
+        // AQW build: log quality changes (AQW's own options can set it).
+        if self.0.quality.get() != quality {
+            tracing::info!(target: "ruffle_aqw_perf", "stage quality: {:?} -> {quality:?}", self.0.quality.get());
+        }
         self.0.quality.set(quality);
         self.0.use_bitmap_downsampling.set(matches!(
             quality,
@@ -621,6 +625,16 @@ impl<'gc> Stage<'gc> {
     /// You can easily observe the difference between render_viewport and render
     /// in FP by checking which stuff can be rendered using `BitmapData.draw`.
     pub fn render_viewport(self, context: &mut RenderContext<'_, 'gc>) {
+        // AQW build: what a recorded walk depends on besides the objects (see
+        // `replay::lean_render`).
+        if let Some(recorder) = context.recorder.as_deref_mut() {
+            let commands = recorder.scene(super::replay::Scene {
+                view_bounds: self.view_bounds(),
+                viewport: self.0.viewport_matrix.get(),
+                quality: self.quality(),
+            });
+            context.commands.commands.reserve(commands);
+        }
         context.transform_stack.push(&Transform {
             matrix: self.0.viewport_matrix.get(),
             color_transform: Default::default(),
@@ -910,6 +924,8 @@ impl<'gc> TDisplayObjectContainer<'gc> for Stage<'gc> {
     }
 
     fn raw_container_mut(&self, gc_context: &Mutation<'gc>) -> RefMut<'_, ChildContainer<'gc>> {
+        // AQW build: its children change (lean render: see `display_object::replay`).
+        crate::display_object::replay::mark_dirty(&(*self).base());
         unlock!(Gc::write(gc_context, self.0), StageData, child).borrow_mut()
     }
 }

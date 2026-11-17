@@ -68,6 +68,7 @@ impl TestRunner {
         renderer: Option<(Box<dyn RenderInterface>, Box<dyn RenderBackend>)>,
         viewport_dimensions: ViewportDimensions,
     ) -> Result<Self> {
+        image_test::set_dump_key(&test.name);
         if test.options.num_frames.is_none() && test.options.num_ticks.is_none() {
             return Err(anyhow!(
                 "Test {} must specify at least one of num_frames or num_ticks",

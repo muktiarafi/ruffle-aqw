@@ -271,7 +271,7 @@ impl UiBackend for DesktopUiBackend {
             .event_loop
             .send_event(RuffleEvent::OpenDialog(DialogDescriptor::ShowMessage(
                 MessageDialogConfiguration::new(
-                    LocalizableText::NonLocalizedText("Ruffle".into()),
+                    LocalizableText::NonLocalizedText("Mugetsu".into()), // AQW build: window title
                     LocalizableText::NonLocalizedText(message.to_string().into()),
                 ),
             )));
@@ -320,61 +320,69 @@ impl UiBackend for DesktopUiBackend {
 
     fn load_device_font(&self, query: &FontQuery, register: &mut dyn FnMut(FontDefinition)) {
         let name = &query.name;
-        let is_bold = query.is_bold;
-        let is_italic = query.is_italic;
-        let lowercase_name = query.lowercase_name.as_str();
 
-        let weight = if is_bold {
-            fontdb::Weight::BOLD
-        } else {
-            fontdb::Weight::NORMAL
-        };
-        let style = if is_italic {
-            fontdb::Style::Italic
-        } else {
-            fontdb::Style::Normal
-        };
-
-        // fontdb's `query` is case-sensitive; resolve the canonical family name
-        // case-insensitively (first match) and re-query so fontdb still selects
-        // weight/style. Always resolving case-insensitively avoids order-dependent
-        // picks when case-duplicate fonts are installed.
-        let canonical = self.font_database.faces().find_map(|face| {
-            face.families
-                .iter()
-                .find(|(fam, _)| fam.to_lowercase() == lowercase_name)
-                .map(|(fam, _)| fam.clone())
-        });
-        let id = canonical.and_then(|canon| {
-            if canon.as_str() != name.as_str() {
-                tracing::info!("Device font \"{name}\" matched case-insensitively to \"{canon}\"");
-            }
-            let query = fontdb::Query {
-                families: &[Family::Name(&canon)],
-                weight,
-                style,
+        // AQW build: Flash on Windows asks Windows (GDI) for device fonts, which also accepts
+        // full face names ("Arial Bold") and substitutes missing fonts (Helvetica -> Arial).
+        // fontdb only knows family names, so "Arial Bold" was "unknown" and Ruffle drew it
+        // with whatever device font it had loaded first: AQW's combat text ("Dodge!", skill
+        // names) looked wrong. Try what Windows would use, in order.
+        for (candidate, (family, is_bold, is_italic)) in
+            device_font_candidates(name, query.is_bold, query.is_italic)
+                .into_iter()
+                .enumerate()
+        {
+            // (From upstream: fontdb's `query` is case-sensitive, so the family is looked up
+            // case-insensitively first and asked for in its own spelling. The first match, so
+            // the pick doesn't depend on the order when fonts differ only in case.)
+            let lowercase = family.to_lowercase();
+            let Some(family) = self.font_database.faces().find_map(|face| {
+                face.families
+                    .iter()
+                    .find(|(known, _)| known.to_lowercase() == lowercase)
+                    .map(|(known, _)| known.clone())
+            }) else {
+                continue;
+            };
+            let fontdb_query = fontdb::Query {
+                families: &[Family::Name(&family)],
+                weight: if is_bold {
+                    fontdb::Weight::BOLD
+                } else {
+                    fontdb::Weight::NORMAL
+                },
+                style: if is_italic {
+                    fontdb::Style::Italic
+                } else {
+                    fontdb::Style::Normal
+                },
                 ..Default::default()
             };
-            self.font_database.query(&query)
-        });
 
-        // It'd be nice if we can get the full list of candidates... Feature request?
-        if let Some(id) = id
-            && let Some(face) = self.font_database.face(id)
-        {
-            tracing::info!(
-                "Loading device font \"{}\" for \"{name}\" (italic: {is_italic}, bold: {is_bold})",
-                face.post_script_name
-            );
+            // It'd be nice if we can get the full list of candidates... Feature request?
+            if let Some(id) = self.font_database.query(&fontdb_query)
+                && let Some(face) = self.font_database.face(id)
+            {
+                tracing::info!(
+                    "Loading device font \"{}\" for \"{name}\" (italic: {is_italic}, bold: {is_bold})",
+                    face.post_script_name
+                );
 
-            match load_fontdb_font(
-                name.to_string(),
-                face,
-                self.device_font_renderer,
-                &self.font_atlases,
-            ) {
-                Ok(font_definition) => register(font_definition),
-                Err(error) => tracing::error!("Error loading font from fontdb: {error}"),
+                // A substitute is registered as exactly the font that was asked for: Ruffle
+                // looks fonts up by name, bold and italic, and AQW asks for e.g. "Helvetica
+                // Neue Bold" without the bold flag. Windows answers that with Arial Bold, which
+                // registered as bold wasn't found, so the text fell back to regular Arial.
+                let flags = (candidate > 0).then_some((query.is_bold, query.is_italic));
+                match load_fontdb_font(
+                    name.to_string(),
+                    face,
+                    flags,
+                    self.device_font_renderer,
+                    &self.font_atlases,
+                ) {
+                    Ok(font_definition) => register(font_definition),
+                    Err(error) => tracing::error!("Error loading font from fontdb: {error}"),
+                }
+                return;
             }
         }
     }
@@ -506,14 +514,63 @@ fn load_font_from_file(
     }
 }
 
+/// AQW build: the fonts to try for a device font name, the way Windows resolves it for Flash:
+/// the name itself, then the name with a trailing style ("Arial Bold" -> Arial, bold), then
+/// Windows' substitutes for common Mac/print font names, then Arial (Windows' default sans).
+fn device_font_candidates(name: &str, is_bold: bool, is_italic: bool) -> Vec<(String, bool, bool)> {
+    let mut candidates = vec![(name.to_string(), is_bold, is_italic)];
+
+    let mut family = name.trim().to_string();
+    let (mut bold, mut italic) = (is_bold, is_italic);
+    loop {
+        let lower = family.to_ascii_lowercase();
+        let suffix = [" bold", " italic", " oblique", " regular"]
+            .into_iter()
+            .find(|suffix| lower.ends_with(suffix));
+        let Some(suffix) = suffix else {
+            break;
+        };
+        match suffix {
+            " bold" => bold = true,
+            " italic" | " oblique" => italic = true,
+            _ => {}
+        }
+        family.truncate(family.len() - suffix.len());
+        family = family.trim_end().to_string();
+    }
+    if !family.is_empty() && family != name {
+        candidates.push((family.clone(), bold, italic));
+    }
+
+    let lower = family.to_ascii_lowercase();
+    let substitute = if lower.starts_with("helvetica") || lower == "arial mt" || lower == "geneva" {
+        Some("Arial")
+    } else if lower == "times" || lower == "times roman" {
+        Some("Times New Roman")
+    } else if lower == "courier" {
+        Some("Courier New")
+    } else {
+        None
+    };
+    if let Some(substitute) = substitute {
+        candidates.push((substitute.to_string(), bold, italic));
+    }
+    candidates.push(("Arial".to_string(), bold, italic));
+    candidates
+}
+
+/// AQW build: `flags` (bold, italic) overrides what the face says about itself.
 fn load_fontdb_font(
     name: String,
     face: &FaceInfo,
+    flags: Option<(bool, bool)>,
     device_font_renderer: DeviceFontRenderer,
     atlases: &FontAtlases,
 ) -> Result<FontDefinition<'static>> {
-    let is_bold = face.weight > fontdb::Weight::NORMAL;
-    let is_italic = face.style != fontdb::Style::Normal;
+    let (is_bold, is_italic) = flags.unwrap_or((
+        face.weight > fontdb::Weight::NORMAL,
+        face.style != fontdb::Style::Normal,
+    ));
 
     match &face.source {
         fontdb::Source::File(path) => load_font_from_file(

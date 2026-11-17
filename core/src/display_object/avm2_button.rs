@@ -99,6 +99,12 @@ pub struct Avm2ButtonData<'gc> {
 }
 
 impl<'gc> Avm2Button<'gc> {
+    /// AQW build: the shared data that every instance of this library symbol points to, used
+    /// to tell whether the symbol (and so its movie's library) is still in use.
+    pub fn aqw_shared(self) -> Gc<'gc, ()> {
+        Gc::erase(self.0.shared)
+    }
+
     pub fn from_swf_tag(
         button: &swf::Button,
         movie: SwfMovie<'gc>,
@@ -527,12 +533,17 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
                 if has_movie_clip_state && self.movie().version() > 9 {
                     self.0.weird_framescript_order.set(true);
 
+                    // AQW build: see `movie_clip::frame_script_retry`.
+                    let retry_scope =
+                        crate::display_object::movie_clip::frame_script_retry::open(self.into());
+
                     let stage = context.stage;
                     stage.construct_frame(context);
                     broadcast_frame_constructed(context);
                     self.set_state(context, ButtonState::Up);
                     stage.run_frame_scripts(context);
                     broadcast_frame_exited(context);
+                    drop(retry_scope);
                 }
 
                 if let Some(avm2_object) = self.0.object.get() {

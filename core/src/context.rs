@@ -377,8 +377,19 @@ impl<'gc> UpdateContext<'gc> {
         *self.instance_counter = 0;
 
         if self.root_swf.is_action_script_3() {
+            // AQW build: AQW's loader is SWF 15, but the game it loads (since 2026-10-10) uses
+            // newer classes such as flash.ui.GameInputDevice (SWF 21), which would be hidden
+            // and stop the game at startup. The Mugetsu app (`set_show_all_apis`) shows every
+            // API up to SWF 31 (what our playerglobals run as) to every movie, so AQW works
+            // wherever it's loaded from; elsewhere (Ruffle's tests) movies keep Flash's
+            // versioning.
+            let swf_version = if crate::show_all_apis() {
+                self.root_swf.version().max(31)
+            } else {
+                self.root_swf.version()
+            };
             self.avm2.root_api_version =
-                ApiVersion::from_swf_version(self.root_swf.version(), self.avm2.player_runtime);
+                ApiVersion::from_swf_version(swf_version, self.avm2.player_runtime);
         }
 
         self.stage.set_movie_size(
@@ -603,6 +614,9 @@ pub struct RenderContext<'a, 'gc> {
 
     /// The current player's stage (including all loaded levels)
     pub stage: Stage<'gc>,
+
+    /// AQW build: records the walk for frame interpolation's next pictures (see `replay`).
+    pub recorder: Option<&'a mut crate::display_object::replay::Recorder<'gc>>,
 }
 
 impl<'gc> RenderContext<'_, 'gc> {

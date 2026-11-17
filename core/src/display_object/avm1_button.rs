@@ -62,6 +62,12 @@ struct Avm1ButtonDataMut<'gc> {
 }
 
 impl<'gc> Avm1Button<'gc> {
+    /// AQW build: the shared data that every instance of this library symbol points to, used
+    /// to tell whether the symbol (and so its movie's library) is still in use.
+    pub fn aqw_shared(self) -> Gc<'gc, ()> {
+        Gc::erase(self.0.shared)
+    }
+
     pub fn from_swf_tag(
         button: &swf::Button,
         movie: SwfMovie<'gc>,
@@ -407,6 +413,8 @@ impl<'gc> TDisplayObjectContainer<'gc> for Avm1Button<'gc> {
     }
 
     fn raw_container_mut(&self, mc: &Mutation<'gc>) -> RefMut<'_, ChildContainer<'gc>> {
+        // AQW build: its children change (lean render: see `display_object::replay`).
+        crate::display_object::replay::mark_dirty(&(*self).base());
         let data = unlock!(Gc::write(mc, self.0), Avm1ButtonData, cell);
         RefMut::map(data.borrow_mut(), |this| &mut this.container)
     }

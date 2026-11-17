@@ -32,11 +32,14 @@ mod avm2_button;
 mod bitmap;
 mod container;
 mod edit_text;
-mod graphic;
+pub(crate) mod graphic;
 mod interactive;
+pub mod interp;
+pub mod replay;
 mod loader_display;
 mod morph_shape;
 mod movie_clip;
+pub mod pick_notes;
 mod stage;
 mod text;
 mod text_line;
@@ -112,6 +115,14 @@ pub struct BitmapCache {
 
     /// Whether we warned that this bitmap was too large to be cached
     warned_for_oversize: bool,
+
+    /// AQW build: sub-pixel phase (twips, 0..20) of the cache's top-left corner relative to the
+    /// object's origin, fixed when first drawn (see `stabilize_cache_bounds`).
+    aqw_phase: Option<(i32, i32)>,
+
+    /// AQW build: the SWF frame the contents last changed in. With frame interpolation the
+    /// contents move between frames, so the cache is redrawn on every draw of that frame.
+    aqw_changed_frame: u64,
 }
 
 impl BitmapCache {
@@ -121,6 +132,7 @@ impl BitmapCache {
         // Setting the old transform to something invalid is a cheap way of making it invalid,
         // without reserving an extra field for.
         self.matrix_a = f32::NAN;
+        self.aqw_changed_frame = interp::frame();
     }
 
     fn is_dirty(&self, other: &Matrix, source_width: u32, source_height: u32) -> bool {
@@ -318,6 +330,18 @@ pub struct DisplayObjectBase<'gc> {
 
     /// Rectangle used for 9-slice scaling (`DisplayObject.scale9grid`).
     scaling_grid: Cell<Rectangle<Twips>>,
+
+    /// AQW build: see `settle`.
+    #[collect(require_static)]
+    settled: settle::SettledMark,
+
+    /// AQW build: the previous frame's transform, for frame interpolation (see `interp`).
+    #[collect(require_static)]
+    interp: interp::Tracker,
+
+    /// AQW build: for lean render (see `replay::lean_render`).
+    #[collect(require_static)]
+    render_note: replay::Note,
 }
 
 #[derive(Clone)]
@@ -363,6 +387,9 @@ impl Default for DisplayObjectBase<'_> {
             scroll_rect: Cell::new(None),
             next_scroll_rect: Default::default(),
             scaling_grid: Default::default(),
+            settled: Default::default(),
+            interp: Default::default(),
+            render_note: Default::default(),
         }
     }
 }
@@ -373,6 +400,7 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_flag(&self, flag: DisplayObjectFlags, value: bool) {
+        replay::changed();
         let mut flags = self.flags.get();
         flags.set(flag, value);
         self.flags.set(flags);
@@ -389,6 +417,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_depth(&self, depth: Depth) {
+        replay::changed();
+        replay::mark_dirty(self);
         self.depth.set(depth);
     }
 
@@ -418,8 +448,17 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     pub fn set_matrix(&self, matrix: Matrix) {
+        replay::changed();
+        replay::mark_dirty(self);
         self.matrix.set(matrix);
         self.set_scale_rotation_cached(false);
+        self.pick_moved();
+    }
+
+    /// AQW build: this object moved inside its parent (see `pick_notes`: the parent's note
+    /// and those above it no longer hold; this object's own note is in its own space).
+    fn pick_moved(&self) {
+        pick_notes::mark_from(self.parent.get());
     }
 
     pub fn color_transform(&self) -> ColorTransform {
@@ -427,6 +466,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     pub fn set_color_transform(&self, color_transform: ColorTransform) {
+        replay::changed();
+        replay::mark_dirty(self);
         self.color_transform.set(color_transform);
     }
 
@@ -438,6 +479,8 @@ impl<'gc> DisplayObjectBase<'gc> {
         &self,
         perspective_projection: Option<PerspectiveProjection>,
     ) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let old = self.perspective_projection.replace(perspective_projection);
         perspective_projection != old
     }
@@ -447,10 +490,13 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_x(&self, x: Twips) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let mut matrix = self.matrix.get();
         let changed = matrix.tx != x;
         matrix.tx = x;
         self.matrix.set(matrix);
+        self.pick_moved();
         self.set_transformed_by_script(true);
         changed
     }
@@ -460,10 +506,13 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_y(&self, y: Twips) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let mut matrix = self.matrix.get();
         let changed = matrix.ty != y;
         matrix.ty = y;
         self.matrix.set(matrix);
+        self.pick_moved();
         self.set_transformed_by_script(true);
         changed
     }
@@ -473,6 +522,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_z(&self, tz: f64) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let changed = self.tz.get() != tz;
         self.set_transformed_by_script(true);
         self.tz.set(tz);
@@ -521,6 +572,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_rotation(&self, degrees: Degrees) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         self.set_transformed_by_script(true);
         self.cache_scale_rotation();
         let changed = self.rotation.get() != degrees;
@@ -552,6 +605,7 @@ impl<'gc> DisplayObjectBase<'gc> {
         matrix.c = (scale_y * -sin_y) as f32;
         matrix.d = (scale_y * cos_y) as f32;
         self.matrix.set(matrix);
+        self.pick_moved();
 
         changed
     }
@@ -562,6 +616,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_scale_x(&self, mut value: Percent) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let changed = self.scale_x.get() != value;
         self.set_transformed_by_script(true);
         self.cache_scale_rotation();
@@ -587,6 +643,7 @@ impl<'gc> DisplayObjectBase<'gc> {
         matrix.a = (cos * value.unit()) as f32;
         matrix.b = (sin * value.unit()) as f32;
         self.matrix.set(matrix);
+        self.pick_moved();
 
         changed
     }
@@ -597,6 +654,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_scale_y(&self, mut value: Percent) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let changed = self.scale_y.get() != value;
         self.set_transformed_by_script(true);
         self.cache_scale_rotation();
@@ -623,6 +682,7 @@ impl<'gc> DisplayObjectBase<'gc> {
         matrix.c = (-sin * value.unit()) as f32;
         matrix.d = (cos * value.unit()) as f32;
         self.matrix.set(matrix);
+        self.pick_moved();
 
         changed
     }
@@ -640,6 +700,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_filters(&self, filters: Box<[Filter]>) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let mut write = self.cell.borrow_mut();
         let changed = filters != write.filters;
         write.filters = filters;
@@ -655,6 +717,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_alpha(&self, value: f64) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         self.set_transformed_by_script(true);
         let value = Fixed8::from_f64(value);
         let mut tf = self.color_transform.get();
@@ -669,6 +733,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_clip_depth(&self, depth: Depth) {
+        replay::changed();
+        replay::mark_dirty(self);
         self.clip_depth.set(depth);
     }
 
@@ -679,6 +745,13 @@ impl<'gc> DisplayObjectBase<'gc> {
     /// You should almost always use `DisplayObject.set_parent` instead, which
     /// properly handles 'orphan' movie clips
     fn set_parent_ignoring_orphan_list(this: &Write<Self>, parent: Option<DisplayObject<'gc>>) {
+        replay::changed();
+        // AQW build: the branch it leaves and the one it joins change (see `pick_notes`).
+        pick_notes::mark_from(this.parent.get());
+        pick_notes::mark_from(parent);
+        // (And for lean render: itself, the ancestors it had and those it gets.)
+        replay::mark_dirty(this);
+        replay::mark_dirty_from(parent);
         unlock!(this, Self, parent).set(parent)
     }
 
@@ -703,6 +776,10 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_avm1_pending_removal(&self, value: bool) {
+        if value {
+            // AQW build: from now on there may be something for `Avm1::remove_pending`.
+            settle::note_pending_removal();
+        }
         self.set_flag(DisplayObjectFlags::AVM1_PENDING_REMOVAL, value);
     }
 
@@ -732,6 +809,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_visible(&self, value: bool) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let changed = self.visible() != value;
         self.set_flag(DisplayObjectFlags::VISIBLE, value);
         changed
@@ -742,6 +821,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_blend_mode(&self, value: ExtendedBlendMode) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         self.blend_mode.replace(value) != value
     }
 
@@ -750,6 +831,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_blend_shader(&self, value: Option<PixelBenderShaderHandle>) {
+        replay::changed();
+        replay::mark_dirty(self);
         self.cell.borrow_mut().blend_shader = value;
     }
 
@@ -764,6 +847,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     /// triggers cache-as-bitmap behavior. Only solid backgrounds are supported; the alpha channel
     /// is ignored.
     fn set_opaque_background(&self, value: Option<Color>) -> bool {
+        replay::changed();
+        replay::mark_dirty(self);
         let value = value.map(|mut color| {
             color.a = 255;
             color
@@ -834,6 +919,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_bitmap_cached_preference(&self, value: bool) {
+        replay::changed();
+        replay::mark_dirty(self);
         self.set_flag(DisplayObjectFlags::CACHE_AS_BITMAP, value);
         self.recheck_cache_as_bitmap();
     }
@@ -848,6 +935,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     /// Any subsequent calls will return false, indicating that you do not need to invalidate the ancestors.
     /// This is reset during rendering.
     fn invalidate_cached_bitmap(&self) -> bool {
+        replay::changed();
+        replay::mark_invalidated(self);
         if self.contains_flag(DisplayObjectFlags::CACHE_INVALIDATED) {
             return false;
         }
@@ -885,6 +974,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_has_scroll_rect(&self, value: bool) {
+        replay::changed();
+        replay::mark_dirty(self);
         self.set_flag(DisplayObjectFlags::HAS_SCROLL_RECT, value);
     }
 
@@ -901,6 +992,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_masker(this: &Write<Self>, node: Option<DisplayObject<'gc>>) {
+        replay::changed();
+        replay::mark_dirty(this);
         unlock!(this, Self, masker).set(node);
     }
 
@@ -909,6 +1002,8 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_maskee(this: &Write<Self>, node: Option<DisplayObject<'gc>>) {
+        replay::changed();
+        replay::mark_dirty(this);
         unlock!(this, Self, maskee).set(node);
     }
 
@@ -959,6 +1054,8 @@ impl BoundsMode {
 struct DrawCacheInfo {
     bitmap: BitmapInfo,
     dirty: bool,
+    /// AQW build: `bitmap` was made for this draw (see `deferred_shapes`).
+    fresh: bool,
     base_transform: Transform,
     bounds: Rectangle<Twips>,
     draw_offset: Point<i32>,
@@ -970,13 +1067,63 @@ pub fn render_base<'gc>(
     context: &mut RenderContext<'_, 'gc>,
     options: RenderOptions,
 ) {
+    // AQW build: lean render (see `replay::lean_render`).
+    let lean = context.recorder.as_deref().is_some_and(|r| r.is_lean());
+
     if options.skip_masks && this.maskee().is_some() {
         // Skip rendering masks (unless we are rendering one explicitly).
         return;
     }
 
+    // AQW build: with frame interpolation, the walk may be recorded for the next pictures (see
+    // `replay`): objects that depend on more than their transform are drawn again in each.
+    let island = match context.recorder.as_deref_mut() {
+        Some(recorder) => recorder.island_begin(
+            &context.commands,
+            this,
+            &options,
+            context.use_bitmap_cache && this.is_bitmap_cached(),
+        ),
+        None => false,
+    };
+    let mut recorded_node = false;
     if options.apply_transform {
-        let transform = this.base().transform(options.apply_matrix);
+        let mut transform = this.base().transform(options.apply_matrix);
+        let real = context
+            .recorder
+            .as_deref()
+            .is_some_and(|r| r.recording())
+            .then(|| transform.clone());
+        let mut from = None;
+        if options.apply_matrix {
+            if lean
+                && real.is_some()
+                && let Some(recorder) = context.recorder.as_deref()
+            {
+                // (It may have been drawn without being walked: see `replay`.)
+                recorder.catch_up(this);
+            }
+            // AQW build: frame interpolation (does nothing unless it's on).
+            from = this.base().interp.blend(&mut transform, this.base().ratio.get());
+        }
+        if lean
+            && let Some(real) = &real
+            && replay::reuse_branch(context, this, &options, real, from)
+        {
+            // AQW build: nothing in its branch changed; it was drawn from the last recording.
+            return;
+        }
+        if let (Some(real), Some(recorder)) = (real, context.recorder.as_deref_mut()) {
+            recorded_node = recorder.push_node(
+                &context.commands,
+                context.transform_stack,
+                real,
+                from,
+                &transform,
+                this,
+                options.skip_masks && options.apply_transform && options.apply_matrix,
+            );
+        }
         context.transform_stack.push(&transform);
     }
 
@@ -985,6 +1132,11 @@ pub fn render_base<'gc>(
         Some(std::mem::take(&mut context.commands))
     } else {
         None
+    };
+    // (The list taken is the one drawn into so far.)
+    let nested = match (&original_commands, context.recorder.as_deref_mut()) {
+        (Some(taken), Some(recorder)) => recorder.nest_begin(taken),
+        _ => false,
     };
 
     let cache_info = if context.use_bitmap_cache && this.is_bitmap_cached() {
@@ -996,11 +1148,18 @@ pub fn render_base<'gc>(
             &context.stage.view_matrix(),
         );
         let name = this.name();
+        let opaque_background = this.opaque_background();
         let mut filters: Vec<Filter> = this.filters().to_owned();
         let swf_version = this.swf_version();
         filters.retain(|f| !f.impotent());
+        // AQW build: with frame interpolation, a glow that pulses is drawn in between too.
+        let filters_blended = this.base().interp.blend_filters(&mut filters);
 
+        // AQW build: logged after the cache borrow ends (it reads the object's filters).
+        let mut log_oversize = false;
+        let oversize_matrix = base_transform.matrix;
         if let Some(cache) = &mut *this.base().bitmap_cache_mut() {
+            let bounds = stabilize_cache_bounds(cache, bounds, &base_transform.matrix);
             let width = bounds.width().to_pixels().ceil().max(0.0);
             let height = bounds.height().to_pixels().ceil().max(0.0);
             if width <= u16::MAX as f64 && height <= u16::MAX as f64 {
@@ -1025,18 +1184,38 @@ pub fn render_base<'gc>(
                     y_max: filter_rect.y_max.to_pixels().ceil() as i32,
                 };
                 let draw_offset = Point::new(filter_rect.x_min, filter_rect.y_min);
-                if cache.is_dirty(&base_transform.matrix, width, height) {
+                let contents_moving = interp::active()
+                    && (cache.aqw_changed_frame == interp::frame() || filters_blended);
+                // AQW build: drawn blank, left as it was, or drawn with a cached part that
+                // was, because shapes weren't ready (see `deferred_shapes`), and they are now:
+                // drawn again. (A cached object this one is drawn into waits for the same
+                // shapes, so it's walked again, and this one with it, in the same picture.)
+                let shapes_pending = cache.bitmap().is_some_and(|bitmap| {
+                    graphic::deferred_shapes::take_cache_pending(&bitmap.handle)
+                });
+                if contents_moving
+                    || shapes_pending
+                    || cache.is_dirty(&base_transform.matrix, width, height)
+                {
+                    let (texture_width, texture_height) = cache_texture_size(
+                        filter_rect.width() as u32,
+                        filter_rect.height() as u32,
+                        &filters,
+                        opaque_background,
+                    );
+                    let before = cache.bitmap().map(|bitmap| bitmap.handle);
                     cache.update(
                         context.renderer,
                         base_transform.matrix,
                         width,
                         height,
-                        filter_rect.width() as u32,
-                        filter_rect.height() as u32,
+                        texture_width,
+                        texture_height,
                         draw_offset,
                         swf_version,
                     );
                     cache_info = cache.bitmap().map(|bitmap| DrawCacheInfo {
+                        fresh: before.as_ref() != Some(&bitmap.handle),
                         bitmap,
                         dirty: true,
                         base_transform,
@@ -1048,6 +1227,7 @@ pub fn render_base<'gc>(
                     cache_info = cache.bitmap().map(|bitmap| DrawCacheInfo {
                         bitmap,
                         dirty: false,
+                        fresh: false,
                         base_transform,
                         bounds,
                         draw_offset,
@@ -1061,10 +1241,15 @@ pub fn render_base<'gc>(
                         name
                     );
                     cache.warned_for_oversize = true;
+                    log_oversize = true;
                 }
                 cache.clear();
                 cache_info = None;
             }
+        }
+        if log_oversize {
+            // AQW build: say which part of the object has the huge bounds.
+            aqw_log_oversize_parts(this, &oversize_matrix, &context.stage.view_matrix(), 0);
         }
         cache_info
     } else {
@@ -1080,6 +1265,7 @@ pub fn render_base<'gc>(
             + Twips::from_pixels_i32(cache_info.draw_offset.x);
         let offset_y = cache_info.bounds.y_min - cache_info.base_transform.matrix.ty
             + Twips::from_pixels_i32(cache_info.draw_offset.y);
+        aqw_trace_cache_placement(this, &cache_info, offset_x, offset_y);
 
         if cache_info.dirty {
             let mut transform_stack = TransformStack::new();
@@ -1094,6 +1280,7 @@ pub fn render_base<'gc>(
                 tz: Default::default(),
             });
             let mut offscreen_context = RenderContext {
+                recorder: None,
                 renderer: context.renderer,
                 commands: CommandList::new(),
                 cache_draws: context.cache_draws,
@@ -1105,12 +1292,18 @@ pub fn render_base<'gc>(
                 use_bitmap_cache: true,
                 stage: context.stage,
             };
+            // AQW build: the cached objects walked inside this one list it as an ancestor
+            // (see `deferred_shapes`).
+            graphic::deferred_shapes::enter_cache(&cache_info.bitmap.handle);
             this.render_self(&mut offscreen_context);
+            let ancestors = graphic::deferred_shapes::leave_cache();
             offscreen_context.cache_draws.push(BitmapCacheEntry {
                 handle: cache_info.bitmap.handle.clone(),
                 commands: offscreen_context.commands,
                 clear: this.opaque_background().unwrap_or_default(),
                 filters: cache_info.filters,
+                fresh: cache_info.fresh,
+                ancestors,
             });
         }
 
@@ -1161,28 +1354,71 @@ pub fn render_base<'gc>(
     }
 
     if let Some(original_commands) = original_commands {
+        let nested_ops = if nested {
+            context
+                .recorder
+                .as_deref_mut()
+                .map(|r| r.nest_close(&context.commands))
+        } else {
+            None
+        };
         let sub_commands = std::mem::replace(&mut context.commands, original_commands);
+        let render_blend_mode = if let ExtendedBlendMode::Shader = blend_mode {
+            // Note - Flash appears to let you set blend mode to shader
+            // without having blend shader set.  In this case, Flash seems
+            // to fall back to a normal blend.
+            if let Some(shader) = this.blend_shader() {
+                RenderBlendMode::Shader(shader)
+            } else {
+                RenderBlendMode::Builtin(swf::BlendMode::Normal)
+            }
+        } else {
+            RenderBlendMode::Builtin(blend_mode.try_into().unwrap())
+        };
+        let maskers = context.commands.maskers();
         // If there's nothing to draw, throw away the blend entirely.
         if !sub_commands.is_empty() {
-            let render_blend_mode = if let ExtendedBlendMode::Shader = blend_mode {
-                // Note - Flash appears to let you set blend mode to shader
-                // without having blend shader set.  In this case, Flash seems
-                // to fall back to a normal blend.
-                if let Some(shader) = this.blend_shader() {
-                    RenderBlendMode::Shader(shader)
-                } else {
-                    RenderBlendMode::Builtin(swf::BlendMode::Normal)
-                }
-            } else {
-                RenderBlendMode::Builtin(blend_mode.try_into().unwrap())
-            };
-            context.commands.blend(sub_commands, render_blend_mode);
+            context
+                .commands
+                .blend(sub_commands, render_blend_mode.clone());
+        }
+        if let (Some(ops), Some(recorder)) = (nested_ops, context.recorder.as_deref_mut()) {
+            recorder.nest_end(&context.commands, ops, render_blend_mode, maskers);
         }
     }
 
     if options.apply_transform {
+        if recorded_node && let Some(recorder) = context.recorder.as_deref_mut() {
+            recorder.pop_node(&context.commands);
+        }
         context.transform_stack.pop();
     }
+    if island && let Some(recorder) = context.recorder.as_deref_mut() {
+        recorder.island_end(&context.commands);
+    }
+}
+
+/// AQW build: `local_to_global_matrix` with the matrices objects are drawn with during frame
+/// interpolation.
+fn blended_global_matrix(object: DisplayObject<'_>) -> Matrix {
+    let base = object.base();
+    let mut matrix = base.interp.peek(base.matrix());
+    if let Some(rect) = object.scroll_rect() {
+        matrix *= Matrix::translate(-rect.x_min, -rect.y_min);
+    }
+    let mut node = object.parent();
+    while let Some(display_object) = node {
+        if display_object.as_stage().is_some() {
+            break;
+        }
+        if let Some(rect) = display_object.scroll_rect() {
+            matrix = Matrix::translate(-rect.x_min, -rect.y_min) * matrix;
+        }
+        let base = display_object.base();
+        matrix = base.interp.peek(base.matrix()) * matrix;
+        node = display_object.parent();
+    }
+    matrix
 }
 
 /// This applies the **standard** method of `mask` and `scrollRect`.
@@ -1225,10 +1461,18 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
     let mask = this.get_render_mask();
     let mut mask_transform = ruffle_render::transform::Transform::default();
     if let RenderMask::Stencil(m) | RenderMask::Alpha(m) = mask {
-        if options.apply_transform {
-            mask_transform.matrix = this.global_to_local_matrix().unwrap_or_default();
+        if interp::active() {
+            // AQW build: with frame interpolation, the mask goes where both are drawn.
+            if options.apply_transform {
+                mask_transform.matrix = blended_global_matrix(this).inverse().unwrap_or_default();
+            }
+            mask_transform.matrix *= blended_global_matrix(m);
+        } else {
+            if options.apply_transform {
+                mask_transform.matrix = this.global_to_local_matrix().unwrap_or_default();
+            }
+            mask_transform.matrix *= m.local_to_global_matrix();
         }
-        mask_transform.matrix *= m.local_to_global_matrix();
     }
     if let RenderMask::Stencil(m) = mask {
         context.commands.push_mask();
@@ -1517,7 +1761,75 @@ pub trait TDisplayObject<'gc>:
     /// Returns the matrix for transforming from this object's local space to global stage space,
     /// without applying the translation of this object's own scroll rect.
     #[no_dynamic]
+    /// AQW build: whether frame construction and frame scripts are known to be no-ops for this
+    /// object and everything below it, for the rest of the current frame (see `settle`).
+    #[no_dynamic]
+    fn is_settled(self) -> bool {
+        self.base().settled.is_set()
+    }
+
+    #[no_dynamic]
+    fn set_settled(self) {
+        self.base().settled.set();
+    }
+
+    /// AQW build: something about this object changed that frame construction or frame
+    /// scripts may have to act on: it and every ancestor stop being settled.
+    #[no_dynamic]
+    fn unsettle(self) {
+        // (Where marks are kept from frame to frame, one of an earlier frame counts too.)
+        let kept = settle::keeps_marks();
+        let mut node = Some(self.into());
+        while let Some(object) = node {
+            let object: DisplayObject<'gc> = object;
+            let mark = &object.base().settled;
+            // A settled object only has settled descendants, so an unsettled one means all
+            // its ancestors are unsettled already.
+            if !(if kept { mark.is_marked() } else { mark.is_set() }) {
+                break;
+            }
+            mark.clear();
+            node = object.parent();
+        }
+    }
+
+    /// AQW build: `enter_frame` may have something to do for this object again (it plays, a
+    /// tag is queued, its children change, it is to skip a frame): it and every ancestor stop
+    /// being idle (see `settle`, `MovieClip::can_idle`).
+    #[no_dynamic]
+    fn wake(self) {
+        let mut node = Some(self.into());
+        while let Some(object) = node {
+            let object: DisplayObject<'gc> = object;
+            let mark = &object.base().settled;
+            // An idle object only has idle descendants, so one that isn't means none of its
+            // ancestors is either.
+            if !mark.is_idle() {
+                break;
+            }
+            mark.clear_idle();
+            node = object.parent();
+        }
+    }
+
     fn local_to_global_matrix_without_own_scroll_rect(self) -> Matrix {
+        // AQW build: during a mouse pick, every visited object asks for its world matrix, and
+        // each used to walk all the way up to the stage (thousands of objects in crowded AQW
+        // rooms, several levels deep). Nothing can move during a pick, so each object's matrix
+        // is computed once from its parent's and cached (see `PickMatrixCache`).
+        if let Some(matrix) = pick_matrix_cache::get(self.as_ptr().cast()) {
+            return matrix;
+        }
+        if pick_matrix_cache::active() {
+            let matrix = match self.parent() {
+                Some(parent) if parent.as_stage().is_none() => {
+                    parent.local_to_global_matrix() * self.base().matrix()
+                }
+                _ => self.base().matrix(),
+            };
+            pick_matrix_cache::put(self.as_ptr().cast(), matrix);
+            return matrix;
+        }
         let mut node = self.parent();
         let mut matrix = self.base().matrix();
         while let Some(display_object) = node {
@@ -1953,6 +2265,10 @@ pub trait TDisplayObject<'gc>:
     /// Set the parent of this display object.
     #[no_dynamic]
     fn set_parent(self, context: &mut UpdateContext<'gc>, parent: Option<DisplayObject<'gc>>) {
+        // AQW build: see `frame_lifecycle::early_scripts`.
+        if parent.is_some() {
+            crate::frame_lifecycle::early_scripts::changed(*context.frame_phase);
+        }
         let had_parent = self.parent().is_some();
         let write = Gc::write(context.gc(), self.base());
         DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
@@ -2091,6 +2407,8 @@ pub trait TDisplayObject<'gc>:
 
     #[no_dynamic]
     fn set_scaling_grid(self, rect: Rectangle<Twips>) {
+        // AQW build: its shapes are drawn differently (see `replay::lean_render`).
+        replay::mark_dirty(&self.base());
         self.base().scaling_grid.set(rect);
     }
 
@@ -2284,7 +2602,9 @@ pub trait TDisplayObject<'gc>:
     /// Sets whether this display object has a scroll rectangle applied.
     #[no_dynamic]
     fn set_has_scroll_rect(self, value: bool) {
-        self.base().set_has_scroll_rect(value)
+        self.base().set_has_scroll_rect(value);
+        // AQW build: an object with a scroll rect is not plain for the pick.
+        pick_notes::mark_from(Some(self.into()));
     }
 
     /// Whether this display object has been created by ActionScript 1/2.
@@ -2503,8 +2823,12 @@ pub trait TDisplayObject<'gc>:
     fn pre_render(self, _context: &mut RenderContext<'_, 'gc>) {
         let this = self.base();
         this.clear_invalidate_flag();
-        this.scroll_rect
-            .set(this.has_scroll_rect().then(|| this.next_scroll_rect.get()));
+        let scroll_rect = this.has_scroll_rect().then(|| this.next_scroll_rect.get());
+        // AQW build: the scroll rect in force changes here (see `pick_notes`).
+        if scroll_rect != this.scroll_rect.get() {
+            pick_notes::mark_from(Some(self.into()));
+        }
+        this.scroll_rect.set(scroll_rect);
     }
 
     fn render_self(self, _context: &mut RenderContext<'_, 'gc>) {}
@@ -2841,6 +3165,9 @@ pub trait TDisplayObject<'gc>:
     /// If this object or any ancestor is marked as cacheAsBitmap, it will invalidate that cache.
     #[no_dynamic]
     fn invalidate_cached_bitmap(self) {
+        // AQW build: whatever changed may have changed what a pick can hit here (see
+        // `pick_notes`).
+        pick_notes::mark_from(Some(self.into()));
         if self.base().invalidate_cached_bitmap() {
             // Don't inform ancestors if we've already done so this frame
             if let Some(parent) = self.parent() {
@@ -3294,5 +3621,481 @@ impl<'gc> DisplayObjectWeak<'gc> {
             DisplayObjectWeak::LoaderDisplay(ld) => ld.upgrade(mc).map(|ld| ld.into()),
             DisplayObjectWeak::Bitmap(b) => b.upgrade(mc).map(|ld| ld.into()),
         }
+    }
+}
+
+/// AQW build: world matrices cached for the duration of one mouse pick
+/// (see `TDisplayObject::local_to_global_matrix_without_own_scroll_rect`).
+pub mod pick_matrix_cache {
+    use ruffle_render::matrix::Matrix;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CACHE: RefCell<Option<fnv::FnvHashMap<*const (), Matrix>>> = const { RefCell::new(None) };
+    }
+
+    /// Caches world matrices until dropped. Only for code during which no display object can
+    /// move (mouse picking).
+    pub struct PickMatrixCache {
+        outer: bool,
+    }
+
+    impl PickMatrixCache {
+        pub fn new() -> Self {
+            let outer = CACHE.with(|c| {
+                let mut c = c.borrow_mut();
+                let outer = c.is_none();
+                if outer {
+                    *c = Some(Default::default());
+                }
+                outer
+            });
+            Self { outer }
+        }
+    }
+
+    impl Drop for PickMatrixCache {
+        fn drop(&mut self) {
+            if self.outer {
+                CACHE.with(|c| *c.borrow_mut() = None);
+            }
+        }
+    }
+
+    pub(super) fn active() -> bool {
+        CACHE.with(|c| c.borrow().is_some())
+    }
+
+    pub(super) fn get(object: *const ()) -> Option<Matrix> {
+        CACHE.with(|c| c.borrow().as_ref().and_then(|m| m.get(&object).copied()))
+    }
+
+    pub(super) fn put(object: *const (), matrix: Matrix) {
+        CACHE.with(|c| {
+            if let Some(m) = c.borrow_mut().as_mut() {
+                m.insert(object, matrix);
+            }
+        });
+    }
+}
+
+/// AQW build: skipping the parts of the display list a nested frame can't affect.
+///
+/// Every `gotoAndStop`/`gotoAndPlay` in AS3 (SWF10+) runs frame construction and frame
+/// scripts for the *entire* stage (`run_inner_goto_frame`). AQW calls them dozens of times per
+/// frame during fights, with thousands of objects on stage: up to ~40% of the main thread.
+/// After the first walk in a frame almost everything is "settled": constructed, with no queued
+/// goto and no frame script left to run, so walking it again does nothing.
+///
+/// A movie clip is marked settled at the end of its `run_frame_scripts` if that is provably
+/// so for it and all its children (`MovieClip::can_settle`); `construct_frame` and
+/// `run_frame_scripts` skip settled clips. Marks only last until the next frame (the epoch is
+/// bumped when a frame starts, before its walks), and anything that could give a settled clip
+/// work again within the frame (a goto, a change to its children, a queued goto, a frame
+/// script being added, queued or run) unsettles it and its ancestors (`unsettle`).
+pub mod settle {
+    use std::cell::Cell;
+
+    thread_local! {
+        static EPOCH: Cell<u64> = const { Cell::new(1) };
+    }
+
+    /// Unsettles every display object (called when a frame starts).
+    pub fn new_frame() {
+        EPOCH.with(|e| e.set(e.get() + 1));
+    }
+
+    /// `RUFFLE_NO_SETTLE` turns this off, for A/B comparisons.
+    pub fn enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("RUFFLE_NO_SETTLE").is_none())
+    }
+
+    // The lean walks, OFF unless their switches are set.
+    //
+    // The first walks of a frame still visited every object: `enter_frame`, then
+    // `construct_frame` and `run_frame_scripts`, for a room of tens of thousands of objects of
+    // which a handful have anything to do.
+    //
+    // `RUFFLE_LEAN_SCRIPTS` (a `lean-scripts` file next to the exe): a settled mark is not
+    // dropped when the next frame starts; it stays until something unsettles the object. All
+    // that can give a settled clip construction or script work again goes through `unsettle`
+    // already (a clip that plays unsettles itself when its timeline advances, in
+    // `run_frame_internal`), so the first `construct_frame` and `run_frame_scripts` of a frame
+    // skip what the nested ones skipped.
+    //
+    // `RUFFLE_LEAN_FRAMES` (a `lean-frames` file): a second mark, "idle": `enter_frame` has
+    // nothing to do for a clip and everything below it (`MovieClip::can_idle`: it isn't
+    // playing, has no queued tags, isn't to skip a frame, and its children are idle clips or
+    // objects without an `enter_frame`). Set at the end of a clip's `enter_frame`, dropped by
+    // `wake` (it plays, a goto, its children change, it is told to skip a frame);
+    // `enter_frame` skips idle clips.
+    //
+    // `RUFFLE_LEAN_VERIFY` keeps both kinds of marks but still walks everything, and checks
+    // every clip the lean walks would have skipped: that its conditions still hold, and that
+    // the walk did no work in it. What it finds is counted and logged (`violation`); with
+    // `RUFFLE_LEAN_VERIFY=panic` it panics, for test runs.
+
+    fn switch(cell: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
+        *cell.get_or_init(|| std::env::var_os(name).is_some())
+    }
+
+    pub fn lean_scripts() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        enabled() && switch(&ON, "RUFFLE_LEAN_SCRIPTS")
+    }
+
+    pub fn lean_frames() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        switch(&ON, "RUFFLE_LEAN_FRAMES")
+    }
+
+    pub fn lean_verify() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        enabled() && switch(&ON, "RUFFLE_LEAN_VERIFY")
+    }
+
+    thread_local! {
+        static EVER_PENDING_REMOVAL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// An object was marked "pending removal" (AVM1: taken off by a tag while it has an
+    /// unload handler, it stays for a frame). `Avm1::remove_pending` looks through the whole
+    /// stage for such objects at the start of every frame; until one was ever marked (never,
+    /// in an AS3 game) there is nothing to find, and with `lean_frames` it doesn't look.
+    pub fn note_pending_removal() {
+        EVER_PENDING_REMOVAL.with(|e| e.set(true));
+    }
+
+    pub fn ever_pending_removal() -> bool {
+        EVER_PENDING_REMOVAL.with(Cell::get)
+    }
+
+    /// Whether settled marks are kept (and so have to be cleared) from frame to frame.
+    pub fn keeps_marks() -> bool {
+        lean_scripts() || lean_verify()
+    }
+
+    /// Whether idle marks are set at all.
+    pub fn tracks_idle() -> bool {
+        lean_frames() || lean_verify()
+    }
+
+    /// What the walks did since the last report: clips visited and branches skipped, per walk
+    /// (enter_frame, construct_frame, run_frame_scripts), and what the check found.
+    #[derive(Clone, Copy, Default)]
+    struct Stats {
+        visited: [u64; 3],
+        skipped: [u64; 3],
+        frames: u64,
+        violations: u64,
+        /// Things the walks do that a skipped clip must not need (counted for the check).
+        work: u64,
+    }
+
+    thread_local! {
+        static STATS: Cell<Stats> = const { Cell::new(Stats { visited: [0; 3], skipped: [0; 3], frames: 0, violations: 0, work: 0 }) };
+    }
+
+    pub const ENTER: usize = 0;
+    pub const CONSTRUCT: usize = 1;
+    pub const SCRIPTS: usize = 2;
+
+    fn stats(change: impl FnOnce(&mut Stats)) {
+        STATS.with(|s| {
+            let mut stats = s.get();
+            change(&mut stats);
+            s.set(stats);
+        });
+    }
+
+    /// (Only counted where a lean walk or the check is on.)
+    pub fn visited(walk: usize) {
+        if keeps_marks() || tracks_idle() {
+            stats(|s| s.visited[walk] += 1);
+        }
+    }
+
+    pub fn skipped(walk: usize) {
+        if keeps_marks() || tracks_idle() {
+            stats(|s| s.skipped[walk] += 1);
+        }
+    }
+
+    /// A walk did something for a clip: built its object, ran a frame script or a queued
+    /// goto, advanced its timeline, placed a queued child.
+    pub fn work() {
+        if lean_verify() {
+            stats(|s| s.work += 1);
+        }
+    }
+
+    pub fn work_count() -> u64 {
+        STATS.with(|s| s.get().work)
+    }
+
+    /// The check found a clip the lean walks would have skipped although it had work.
+    pub fn violation(walk: &str, what: &str, object: String) {
+        let count = STATS.with(|s| {
+            let mut stats = s.get();
+            stats.violations += 1;
+            s.set(stats);
+            stats.violations
+        });
+        if count <= 40 {
+            tracing::warn!(
+                target: "ruffle_aqw_perf",
+                "LEAN VERIFY: {walk} would have been skipped for {object}, but {what}"
+            );
+        }
+        if std::env::var_os("RUFFLE_LEAN_VERIFY").is_some_and(|v| v == "panic") {
+            panic!("LEAN VERIFY: {walk} would have been skipped for {object}, but {what}");
+        }
+    }
+
+    /// Called when a frame's walks are done: a line in the log now and then.
+    pub fn frame_done() {
+        if !(keeps_marks() || tracks_idle()) {
+            return;
+        }
+        let stats = STATS.with(|s| {
+            let mut stats = s.get();
+            stats.frames += 1;
+            s.set(stats);
+            stats
+        });
+        if stats.frames >= 150 {
+            let per = |n: u64| n as f64 / stats.frames as f64;
+            tracing::info!(
+                target: "ruffle_aqw_perf",
+                "lean walks (scripts {}, frames {}, check {}): per frame, clips visited / branches skipped: enter_frame {:.0} / {:.0}, construct_frame {:.0} / {:.0}, frame scripts {:.0} / {:.0}; check: {} found in all",
+                if lean_scripts() { "on" } else { "off" },
+                if lean_frames() { "on" } else { "off" },
+                if lean_verify() { "on" } else { "off" },
+                per(stats.visited[ENTER]),
+                per(stats.skipped[ENTER]),
+                per(stats.visited[CONSTRUCT]),
+                per(stats.skipped[CONSTRUCT]),
+                per(stats.visited[SCRIPTS]),
+                per(stats.skipped[SCRIPTS]),
+                stats.violations,
+            );
+            STATS.with(|s| {
+                s.set(Stats { violations: stats.violations, work: stats.work, ..Stats::default() })
+            });
+        }
+    }
+
+    /// The epoch an object was settled in (0 = not settled), and whether it is idle (see
+    /// `tracks_idle`). Clones (instantiated library symbols, duplicated clips) start with
+    /// neither.
+    #[derive(Default)]
+    pub struct SettledMark(Cell<u64>, Cell<bool>);
+
+    impl Clone for SettledMark {
+        fn clone(&self) -> Self {
+            Self::default()
+        }
+    }
+
+    impl SettledMark {
+        pub fn is_set(&self) -> bool {
+            let epoch = self.0.get();
+            epoch != 0 && (lean_scripts() || epoch == EPOCH.with(Cell::get))
+        }
+
+        /// Set in an earlier frame and not cleared since: what `lean_scripts` skips and the
+        /// plain way walks.
+        pub fn is_carried(&self) -> bool {
+            self.0.get() != 0 && self.0.get() != EPOCH.with(Cell::get)
+        }
+
+        pub fn is_marked(&self) -> bool {
+            self.0.get() != 0
+        }
+
+        pub fn set(&self) {
+            if enabled() {
+                self.0.set(EPOCH.with(Cell::get));
+            }
+        }
+
+        pub fn clear(&self) {
+            self.0.set(0);
+        }
+
+        pub fn is_idle(&self) -> bool {
+            self.1.get()
+        }
+
+        pub fn set_idle(&self) {
+            self.1.set(true);
+        }
+
+        pub fn clear_idle(&self) {
+            self.1.set(false);
+        }
+    }
+}
+
+/// AQW build: logs the render bounds of `object` and its descendants that are huge
+/// (> 20,000 px), to find what blows up a cacheAsBitmap object's size.
+fn aqw_log_oversize_parts<'gc>(
+    object: DisplayObject<'gc>,
+    matrix: &Matrix,
+    view_matrix: &Matrix,
+    depth: usize,
+) {
+    if depth > 12 {
+        return;
+    }
+    let own = *matrix * object.self_bounds(BoundsMode::Engine);
+    let total = object.render_bounds_with_transform(matrix, true, view_matrix);
+    let huge = |r: &Rectangle<Twips>| r.is_valid() && (r.width().to_pixels() > 20000.0 || r.height().to_pixels() > 20000.0);
+    if !huge(&total) {
+        return;
+    }
+    let class = object
+        .object2()
+        .map(|o| o.instance_class().name().local_name().to_string())
+        .unwrap_or_default();
+    let m = object.base().matrix();
+    tracing::warn!(
+        "  {}{:?} [{class}] {:?}: own {:?} total {:?}; matrix a {} b {} c {} d {} tx {} ty {}; filters {:?}; scroll_rect {:?}",
+        "  ".repeat(depth),
+        object.name(),
+        format!("{object:?}").split('(').next().unwrap_or_default().to_string(),
+        own,
+        total,
+        m.a, m.b, m.c, m.d, m.tx.to_pixels(), m.ty.to_pixels(),
+        object.filters(),
+        object.scroll_rect(),
+    );
+    if let Some(ctr) = object.as_container() {
+        for child in ctr.iter_render_list() {
+            let child_matrix = *matrix * child.base().matrix();
+            aqw_log_oversize_parts(child, &child_matrix, view_matrix, depth + 1);
+        }
+    }
+}
+
+/// AQW build: `RUFFLE_TRACE_CACHE=<ancestor name>` (e.g. `mcPreview`) logs, every frame, how
+/// a cacheAsBitmap object under that ancestor is placed (target `ruffle_aqw_trace`).
+fn aqw_trace_cache_placement<'gc>(
+    object: DisplayObject<'gc>,
+    info: &DrawCacheInfo,
+    offset_x: Twips,
+    offset_y: Twips,
+) {
+    static FILTER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(filter) = FILTER.get_or_init(|| std::env::var("RUFFLE_TRACE_CACHE").ok()) else {
+        return;
+    };
+    let mut node = Some(object);
+    let mut found = false;
+    for _ in 0..8 {
+        let Some(n) = node else { break };
+        if n.name().is_some_and(|name| name.to_string() == *filter) {
+            found = true;
+            break;
+        }
+        node = n.parent();
+    }
+    if !found {
+        return;
+    }
+    let m = &info.base_transform.matrix;
+    let x = (m.tx + offset_x).to_pixels();
+    let y = (m.ty + offset_y).to_pixels();
+    tracing::info!(
+        target: "ruffle_aqw_trace",
+        "cache {:?}: dirty {} bounds x {:.3}..{:.3} y {:.3}..{:.3} tx {:.3} ty {:.3} draw_offset {:?} -> placed at x {:.3} (err {:+.3}) y {:.3} (err {:+.3}) scale {:.4}",
+        object.name(),
+        info.dirty,
+        info.bounds.x_min.to_pixels(),
+        info.bounds.x_max.to_pixels(),
+        info.bounds.y_min.to_pixels(),
+        info.bounds.y_max.to_pixels(),
+        m.tx.to_pixels(),
+        m.ty.to_pixels(),
+        (info.draw_offset.x, info.draw_offset.y),
+        x,
+        x.round() - x,
+        y,
+        y.round() - y,
+        m.a,
+    );
+}
+
+/// AQW build: the texture size for a cacheAsBitmap object (with its filters) of `width` x
+/// `height` pixels.
+///
+/// The texture of a cached object (and the pooled textures its draw and filters use, which are
+/// the same size) was exactly the object's size. Animated objects with filters (glowing AQW
+/// skill effects, weapons, capes) change size every frame, so every frame made new textures:
+/// 50-100 per frame in fights, up to ~470 requested. On weak or integrated graphics that's tens
+/// of milliseconds per frame, plus memory churn. Rounding each side up in steps of 1/8 of its
+/// power-of-two size (100 -> 112, 300 -> 320, at most ~12% more per side) lets an animating
+/// object keep its textures. The extra area is at the right and bottom, transparent, and not
+/// part of anything the object draws, so it only changes the image where a filter could see it:
+/// only outer glows/shadows and blurs are allowed (around their content they already have a
+/// transparent margin as wide as the blur), not inner/knockout ones, bevels, color matrices
+/// (which can turn transparent pixels visible), convolution, displacement or shaders, and not
+/// with an opaque background (which fills the whole texture).
+fn cache_texture_size(
+    width: u32,
+    height: u32,
+    filters: &[Filter],
+    opaque_background: Option<Color>,
+) -> (u32, u32) {
+    let steps_allowed = crate::cache_size_steps()
+        && opaque_background.is_none()
+        && filters.iter().all(|filter| match filter {
+            Filter::BlurFilter(_) => true,
+            Filter::GlowFilter(glow) => !glow.is_inner() && !glow.is_knockout(),
+            Filter::DropShadowFilter(shadow) => !shadow.is_inner() && !shadow.is_knockout(),
+            _ => false,
+        });
+    if !steps_allowed {
+        return (width, height);
+    }
+    let step_up = |size: u32| {
+        if size == 0 || size >= 4096 {
+            return size;
+        }
+        let step = (size.next_power_of_two() / 8).max(16);
+        size.div_ceil(step) * step
+    };
+    (step_up(width), step_up(height))
+}
+
+/// AQW build: keeps an animated cacheAsBitmap object from shaking.
+///
+/// The cached bitmap is placed with `PixelSnapping::Always` at `bounds.x_min` (plus the filter
+/// offset), so the content lands off by `round(x) - x`. That's fine for a still object, but an
+/// animated one is re-cached every frame with different bounds (e.g. AQW's inventory previews:
+/// swinging, particles), and the rounding error jumped between -0.5 and +0.5 px every frame.
+/// Here the cache's top-left corner keeps the same sub-pixel phase relative to the object's
+/// origin as when it was first drawn (moved out by whole pixels to still cover the bounds), so
+/// the error stays constant. The first frame is unchanged.
+fn stabilize_cache_bounds(
+    cache: &mut BitmapCache,
+    bounds: Rectangle<Twips>,
+    matrix: &Matrix,
+) -> Rectangle<Twips> {
+    if !bounds.is_valid() {
+        return bounds;
+    }
+    let rel_x = (bounds.x_min - matrix.tx).get();
+    let rel_y = (bounds.y_min - matrix.ty).get();
+    let (phase_x, phase_y) =
+        *cache.aqw_phase.get_or_insert((rel_x.rem_euclid(20), rel_y.rem_euclid(20)));
+    // Largest value <= rel that is congruent to the phase (mod one pixel).
+    let snap = |rel: i32, phase: i32| rel - (rel - phase).rem_euclid(20);
+    Rectangle {
+        x_min: matrix.tx + Twips::new(snap(rel_x, phase_x)),
+        y_min: matrix.ty + Twips::new(snap(rel_y, phase_y)),
+        x_max: bounds.x_max,
+        y_max: bounds.y_max,
     }
 }

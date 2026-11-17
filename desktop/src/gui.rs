@@ -1,10 +1,12 @@
-mod context_menu;
+pub(crate) mod context_menu;
 mod controller;
 pub mod dialogs;
 mod locale;
 mod menu_bar;
+mod mugetsu_menu;
 mod movie;
 mod picker;
+mod prompt;
 mod theme;
 mod widgets;
 
@@ -22,6 +24,7 @@ pub use theme::ThemePreference;
 
 use crate::custom_event::RuffleEvent;
 use crate::gui::context_menu::ContextMenu;
+use crate::gui::prompt::{Action, Prompt};
 use crate::player::LaunchOptions;
 use crate::preferences::GlobalPreferences;
 use dialogs::Dialogs;
@@ -43,6 +46,8 @@ pub const MENU_HEIGHT: u32 = 24;
 pub struct RuffleGui {
     event_loop: EventLoopProxy<RuffleEvent>,
     context_menu: Option<ContextMenu>,
+    /// AQW build: Mugetsu's questions in the game window (see `prompt`), the first one shown.
+    prompts: Vec<Prompt>,
     dialogs: Dialogs,
     menu_bar: MenuBar,
 
@@ -62,6 +67,7 @@ impl RuffleGui {
             was_suspended_before_debug: false,
 
             context_menu: None,
+            prompts: Vec::new(),
             dialogs: Dialogs::new(
                 preferences.clone(),
                 default_launch_options.clone(),
@@ -137,15 +143,69 @@ impl RuffleGui {
                 self.close_context_menu(player);
             }
         };
+
+        if let Some(prompt) = self.prompts.first()
+            && let Some(picked) = prompt.show(egui_ctx)
+        {
+            match self.prompts.remove(0).into_action(picked) {
+                Some(Action::RestartWithGraphics(choice)) => {
+                    let _ = self.event_loop.send_event(RuffleEvent::MugetsuSetting(
+                        crate::mugetsu::Setting::RestartWithGraphics(choice),
+                    ));
+                }
+                Some(Action::OpenReleasesPage) => crate::mugetsu::open_releases_page(),
+                Some(Action::OpenGraphicsSettings) => crate::mugetsu::open_graphics_settings(),
+                Some(Action::SkipVersion(version)) => crate::mugetsu::skip_update(&version),
+                Some(Action::StopUpdateReminders) => crate::mugetsu::set_update_reminders(false),
+                Some(Action::Restart) => {
+                    let _ = self
+                        .event_loop
+                        .send_event(RuffleEvent::MugetsuSetting(crate::mugetsu::Setting::Restart));
+                }
+                Some(Action::TurnOnPerformance(level)) => {
+                    let _ = self.event_loop.send_event(RuffleEvent::MugetsuSetting(
+                        crate::mugetsu::Setting::Performance(level),
+                    ));
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// AQW build: asks in the game window before restarting with `choice`. A Windows message
+    /// box opened from winit's event handler was never shown: Windows shows one when its message
+    /// queue goes idle, and inside the handler winit answered every repaint with another. The
+    /// game looked frozen (its window disabled behind the invisible box) until it was ended in
+    /// Task Manager.
+    pub fn ask_graphics_restart(&mut self, choice: Option<crate::mugetsu::Graphics>) {
+        // A later pick replaces an earlier one still being asked about.
+        self.prompts.retain(|prompt| !prompt.is_graphics());
+        self.prompts.push(Prompt::graphics(choice));
+    }
+
+    /// AQW build: offers the restart that gives frame interpolation its full speed (see
+    /// `Prompt::interpolation_restart`), or takes the offer back (`wanted` false:
+    /// interpolation was turned off again).
+    pub fn offer_interpolation_restart(&mut self, wanted: bool) {
+        self.prompts.retain(|prompt| !prompt.is_interpolation_restart());
+        if wanted {
+            self.prompts.push(Prompt::interpolation_restart());
+        }
+    }
+
+    /// AQW build: tells the player something in the game window (see `mugetsu::Notice`).
+    pub fn show_notice(&mut self, notice: crate::mugetsu::Notice) {
+        self.prompts.push(Prompt::notice(notice));
     }
 
     pub fn show_context_menu(
         &mut self,
         menu: Vec<ruffle_core::ContextMenuItem>,
+        settings: Option<crate::mugetsu::MenuSettings>,
         close_event: PlayerEvent,
     ) {
-        if !menu.is_empty() {
-            self.context_menu = Some(ContextMenu::new(menu, close_event));
+        if !menu.is_empty() || settings.is_some() {
+            self.context_menu = Some(ContextMenu::new(menu, settings, close_event));
         }
     }
 

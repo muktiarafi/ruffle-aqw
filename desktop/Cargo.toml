@@ -12,6 +12,12 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true }
+# AQW build: per-thread heaps instead of the contended Windows process heap.
+mimalloc = { version = "0.1", default-features = false }
+# AQW build: readable Rust symbol names in the heap census (see `heap_census`).
+rustc-demangle = "0.1"
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
+wgpu-core = "30.0.1"
 clap_complete = { workspace = true, optional = true }
 cpal = { workspace = true }
 egui = { workspace = true }
@@ -31,6 +37,9 @@ tracing-subscriber = { workspace = true }
 tracing-appender = "0.2.5"
 winit = "0.30.13"
 webbrowser = "1.2.4"
+# AQW build: Mugetsu's new-version check (already in the program for OpenH264's download).
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }
 url = { workspace = true }
 dirs = "6.0"
 rfd = { workspace = true }
@@ -63,7 +72,9 @@ fontconfig = { version = "0.11.0", optional = true }
 ashpd = { version = "0.14.0", features = ["settings", "game_mode"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_Storage_FileSystem"] }
+# AQW build: DXGI, to see which graphics chip Mugetsu will use (see `mugetsu::intel_graphics`).
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Environment", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 vergen = { version = "10.0.3", features = ["build", "cargo"] }
@@ -72,13 +83,19 @@ winresource = "0.1"
 
 [package.metadata.winresource]
 # https://learn.microsoft.com/en-us/windows/win32/menurc/stringfileinfo-block
-ProductName = "Ruffle"
-FileDescription = "Adobe Flash Player emulator"
-CompanyName = "Ruffle LLC"
-LegalCopyright = "Copyright © 2018 Ruffle LLC and Ruffle contributors"
+# AQW build: Mugetsu is a modified build; its file details must not claim to be Ruffle LLC's
+# official program (that also looks like impersonation to antivirus heuristics).
+ProductName = "Mugetsu"
+FileDescription = "Mugetsu player for AdventureQuest Worlds (modified Ruffle)"
+CompanyName = "Mugetsu"
+LegalCopyright = "Mugetsu; based on Ruffle, Copyright © 2018 Ruffle LLC and Ruffle contributors"
+# Keep equal to `mugetsu::VERSION` (desktop/src/mugetsu.rs).
+ProductVersion = "2.0.0"
+FileVersion = "2.0.0 (Ruffle 0.8.0-nightly.2026.11.10)"
 # InternalName should be the same as the module name
 InternalName = "ruffle_desktop"
-OriginalFilename = "ruffle.exe"
+# The release ships this player as Mugetsu.exe.
+OriginalFilename = "Mugetsu.exe"
 
 [features]
 default = ["software_video", "external_video", "lzma", "fontconfig", "freetype"]

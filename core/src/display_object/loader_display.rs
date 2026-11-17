@@ -214,6 +214,8 @@ impl<'gc> TDisplayObjectContainer<'gc> for LoaderDisplay<'gc> {
     }
 
     fn raw_container_mut(&self, gc_context: &Mutation<'gc>) -> RefMut<'_, ChildContainer<'gc>> {
+        // AQW build: its children change (lean render: see `display_object::replay`).
+        crate::display_object::replay::mark_dirty(&(*self).base());
         unlock!(Gc::write(gc_context, self.0), LoaderDisplayData, container).borrow_mut()
     }
 }

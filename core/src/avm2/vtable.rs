@@ -4,7 +4,7 @@ use crate::avm2::metadata::Metadata;
 use crate::avm2::method::Method;
 use crate::avm2::object::{ClassObject, FunctionObject};
 use crate::avm2::property::{Property, PropertyClass};
-use crate::avm2::property_map::PropertyMap;
+use crate::avm2::property_map::{LayeredPropertyMap, PropertyMap};
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::traits::{Trait, TraitKind};
 use crate::avm2::value::Value;
@@ -27,7 +27,11 @@ struct VTableData<'gc> {
 
     protected_namespace: Option<Namespace<'gc>>,
 
-    resolved_traits: PropertyMap<'gc, Property>,
+    /// AQW build: on top of the superclass's (see `LayeredPropertyMap`).
+    resolved_traits: LayeredPropertyMap<'gc, Property>,
+
+    /// AQW build: `resolved_traits` as one map, made when first needed.
+    flattened_traits: Lock<Option<Gc<'gc, PropertyMap<'gc, Property>>>>,
 
     /// Use hashmaps for the metadata tables because metadata will rarely be present on traits
     slot_metadata_table: HashMap<usize, Box<[Metadata<'gc>]>>,
@@ -38,7 +42,85 @@ struct VTableData<'gc> {
     slot_table: Box<[SlotInfo<'gc>]>,
 
     /// method_table is indexed by `disp_id`
-    method_table: Box<[ClassBoundMethod<'gc>]>,
+    /// AQW build: on top of the superclass's (see `MethodTable`).
+    method_table: MethodTable<'gc>,
+
+    /// AQW build: `method_table` as one table, made when first needed (by a subclass).
+    flattened_methods: Lock<Option<Gc<'gc, Box<[ClassBoundMethod<'gc>]>>>>,
+}
+
+/// AQW build: a vtable's methods (indexed by `disp_id`) on top of its superclass's, shared
+/// instead of copied.
+///
+/// Every class's vtable held a copy of its superclass's method table: a class extending
+/// `MovieClip` copied ~200 entries (~4.7 KB), and AQW's gear files define thousands of small
+/// classes: 56 MB of the heap in a busy session. The superclass's table is shared here, with
+/// this class's overrides of its entries and the entries it adds kept on their own.
+#[derive(Collect, Default)]
+#[collect(no_drop)]
+struct MethodTable<'gc> {
+    /// (A `Lock` for `VTable::replace_scopes_with`.)
+    base: Lock<Option<Gc<'gc, Box<[ClassBoundMethod<'gc>]>>>>,
+    /// The `disp_id`s of entries of `base` this class replaces, sorted, and the entries.
+    override_ids: Box<[usize]>,
+    overrides: Box<[ClassBoundMethod<'gc>]>,
+    /// The entries from `disp_id` = the length of `base` on.
+    own: Box<[ClassBoundMethod<'gc>]>,
+}
+
+impl<'gc> MethodTable<'gc> {
+    /// `table` is the whole table: `base`'s entries (replaced at `overridden`) and the new.
+    fn new(
+        base: Option<Gc<'gc, Box<[ClassBoundMethod<'gc>]>>>,
+        mut table: Vec<ClassBoundMethod<'gc>>,
+        mut overridden: Vec<usize>,
+    ) -> Self {
+        let base_len = base.map_or(0, |base| base.len());
+        overridden.retain(|disp_id| *disp_id < base_len);
+        overridden.sort_unstable();
+        overridden.dedup();
+        let overrides = overridden
+            .iter()
+            .map(|disp_id| table[*disp_id].clone())
+            .collect();
+        let own = table.split_off(base_len).into_boxed_slice();
+        Self {
+            base: Lock::new(base),
+            override_ids: overridden.into_boxed_slice(),
+            overrides,
+            own,
+        }
+    }
+
+    fn get(&self, disp_id: usize) -> Option<&ClassBoundMethod<'gc>> {
+        let Some(base) = self.base.get() else {
+            return self.own.get(disp_id);
+        };
+        let base = Gc::as_ref(base);
+        if disp_id >= base.len() {
+            return self.own.get(disp_id - base.len());
+        }
+        if !self.override_ids.is_empty()
+            && let Ok(i) = self.override_ids.binary_search(&disp_id)
+        {
+            return Some(&self.overrides[i]);
+        }
+        base.get(disp_id)
+    }
+
+    fn is_shared(&self) -> bool {
+        self.base.get().is_some() && self.override_ids.is_empty() && self.own.is_empty()
+    }
+
+    /// The whole table, as a copy of the superclass's with this class's changes would be.
+    fn to_vec(&self) -> Vec<ClassBoundMethod<'gc>> {
+        let mut table = self.base.get().map_or_else(Vec::new, |base| base.to_vec());
+        for (disp_id, method) in self.override_ids.iter().zip(&self.overrides) {
+            table[*disp_id] = method.clone();
+        }
+        table.extend_from_slice(&self.own);
+        table
+    }
 }
 
 impl PartialEq for VTable<'_> {
@@ -89,6 +171,7 @@ impl<'gc> VTable<'gc> {
             super_class_obj,
             scope,
             superclass_vtable,
+            mc,
         )?;
         Ok(VTable(Gc::new(mc, this)))
     }
@@ -106,14 +189,33 @@ impl<'gc> VTable<'gc> {
             super_class_obj,
             scope,
             superclass_vtable,
+            context.gc(),
         )?;
         Self::copy_interface_properties(&mut this, defining_class_def, context);
 
         Ok(VTable(Gc::new(context.gc(), this)))
     }
 
-    pub fn resolved_traits(self) -> &'gc PropertyMap<'gc, Property> {
-        &Gc::as_ref(self.0).resolved_traits
+    /// All traits as one map (made the first time; lookups don't need it).
+    pub fn resolved_traits(self, mc: &Mutation<'gc>) -> &'gc PropertyMap<'gc, Property> {
+        Gc::as_ref(self.flattened_traits(mc))
+    }
+
+    fn flattened_traits(self, mc: &Mutation<'gc>) -> Gc<'gc, PropertyMap<'gc, Property>> {
+        if let Some(traits) = self.0.flattened_traits.get() {
+            return traits;
+        }
+        let traits = self.0.resolved_traits.flatten(mc);
+        unlock!(Gc::write(mc, self.0), VTableData, flattened_traits).set(Some(traits));
+        traits
+    }
+
+    /// AQW build: every trait, in no particular order, without making the whole map (for
+    /// diagnostics, which have no `Mutation`).
+    pub fn traits_unordered(
+        self,
+    ) -> impl Iterator<Item = (AvmString<'gc>, Namespace<'gc>, &'gc Property)> {
+        Gc::as_ref(self.0).resolved_traits.iter_unordered()
     }
 
     pub fn get_metadata_for_slot(self, slot_id: usize) -> Option<&'gc [Metadata<'gc>]> {
@@ -149,7 +251,7 @@ impl<'gc> VTable<'gc> {
             return None;
         }
 
-        self.resolved_traits().get_for_multiname(name).cloned()
+        self.0.resolved_traits.get_for_multiname(name).cloned()
     }
 
     /// Coerces `value` to the type of the slot with id `slot_id`
@@ -172,15 +274,29 @@ impl<'gc> VTable<'gc> {
     }
 
     pub fn has_trait(self, name: &Multiname<'gc>) -> bool {
-        self.resolved_traits().get_for_multiname(name).is_some()
+        self.0.resolved_traits.get_for_multiname(name).is_some()
     }
 
     pub fn get_method(self, disp_id: usize) -> Option<Method<'gc>> {
-        self.0.method_table.get(disp_id).cloned().map(|x| x.method)
+        self.0.method_table.get(disp_id).map(|x| x.method)
     }
 
     pub fn get_full_method(self, disp_id: usize) -> Option<&'gc ClassBoundMethod<'gc>> {
         Gc::as_ref(self.0).method_table.get(disp_id)
+    }
+
+    /// AQW build: the whole method table as one (made the first time; for subclasses).
+    fn flattened_methods(self, mc: &Mutation<'gc>) -> Gc<'gc, Box<[ClassBoundMethod<'gc>]>> {
+        if let Some(methods) = self.0.flattened_methods.get() {
+            return methods;
+        }
+        let table = &self.0.method_table;
+        let methods = match table.base.get() {
+            Some(base) if table.is_shared() => base,
+            _ => Gc::new(mc, table.to_vec().into_boxed_slice()),
+        };
+        unlock!(Gc::write(mc, self.0), VTableData, flattened_methods).set(Some(methods));
+        methods
     }
 
     pub fn slot_count(self) -> usize {
@@ -207,9 +323,28 @@ impl<'gc> VTable<'gc> {
     }
 
     pub fn replace_scopes_with(self, mc: &Mutation<'gc>, new_scope: ScopeChain<'gc>) {
-        let methods = field!(Gc::write(mc, self.0), VTableData, method_table).as_deref();
-        for i in 0..methods.len() {
-            unlock!(&methods[i], ClassBoundMethod, scope).set(Some(new_scope));
+        let this = Gc::write(mc, self.0);
+        // AQW build: the entries shared with the superclass are replaced by copies (the
+        // superclass's keep their scopes), and a flattened table made before is dropped.
+        unlock!(this, VTableData, flattened_methods).set(None);
+        let table = field!(this, VTableData, method_table);
+        if let Some(base) = self.0.method_table.base.get() {
+            let copies: Box<[_]> = base
+                .iter()
+                .map(|method| ClassBoundMethod {
+                    scope: Lock::new(Some(new_scope)),
+                    ..method.clone()
+                })
+                .collect();
+            unlock!(table, MethodTable, base).set(Some(Gc::new(mc, copies)));
+        }
+        for methods in [
+            field!(table, MethodTable, overrides).as_deref(),
+            field!(table, MethodTable, own).as_deref(),
+        ] {
+            for i in 0..methods.len() {
+                unlock!(&methods[i], ClassBoundMethod, scope).set(Some(new_scope));
+            }
         }
     }
 
@@ -218,6 +353,7 @@ impl<'gc> VTable<'gc> {
         super_class_obj: Option<ClassObject<'gc>>,
         scope: Option<ScopeChain<'gc>>,
         superclass_vtable: Option<Self>,
+        mc: &Mutation<'gc>,
     ) -> Result<VTableData<'gc>, VTableInitError> {
         // Let's talk about slot_ids and disp_ids.
         // Specification is one thing, but reality is another.
@@ -270,11 +406,24 @@ impl<'gc> VTable<'gc> {
         // so long-term it's still something we should verify.
         // (and it's far from the only verification check we lack anyway)
 
-        let mut resolved_traits = PropertyMap::new();
+        // `RUFFLE_COPY_TRAITS`: each vtable copies its superclass's traits, as before (A/B).
+        static COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let base = superclass_vtable.map(|vtable| vtable.flattened_traits(mc));
+        let mut resolved_traits =
+            if *COPY.get_or_init(|| std::env::var_os("RUFFLE_COPY_TRAITS").is_some()) {
+                base.map_or_else(LayeredPropertyMap::default, |base| {
+                    LayeredPropertyMap::copied(&base)
+                })
+            } else {
+                LayeredPropertyMap::new(base)
+            };
         let mut slot_metadata_table = HashMap::new();
         let mut disp_metadata_table = HashMap::new();
         let mut slot_table = Vec::new();
         let mut method_table = Vec::new();
+        let mut base_methods = None;
+        // AQW build: the inherited entries this class replaces (see `MethodTable`).
+        let mut overridden = Vec::new();
 
         // Subclasses cannot "override" slots in superclasses, so we only
         // maintain the list of slots that were declared by the subclass. At the
@@ -284,11 +433,12 @@ impl<'gc> VTable<'gc> {
         let mut force_auto_assign_slots = false;
 
         if let Some(superclass_vtable) = superclass_vtable {
-            resolved_traits = superclass_vtable.resolved_traits().clone();
             slot_metadata_table = superclass_vtable.0.slot_metadata_table.clone();
             disp_metadata_table = superclass_vtable.0.disp_metadata_table.clone();
             slot_table.extend_from_slice(&superclass_vtable.0.slot_table);
-            method_table.extend_from_slice(&superclass_vtable.0.method_table);
+            let methods = superclass_vtable.flattened_methods(mc);
+            method_table.extend_from_slice(&methods);
+            base_methods = Some(methods);
 
             first_slot_offset = superclass_vtable.slot_count();
 
@@ -297,7 +447,7 @@ impl<'gc> VTable<'gc> {
             {
                 // Copy all protected traits from superclass
                 // but with this class's protected namespace
-                for (local_name, ns, prop) in superclass_vtable.resolved_traits().iter() {
+                for (local_name, ns, prop) in superclass_vtable.resolved_traits(mc).iter() {
                     if ns.exact_version_match(super_protected_namespace) {
                         let new_name = QName::new(protected_namespace, local_name);
                         resolved_traits.insert(new_name, *prop);
@@ -338,6 +488,7 @@ impl<'gc> VTable<'gc> {
                             }
 
                             method_table[*disp_id] = entry;
+                            overridden.push(*disp_id);
                         }
                         // note: ideally overwriting other property types
                         // should be a VerifyError
@@ -371,6 +522,7 @@ impl<'gc> VTable<'gc> {
                             }
 
                             method_table[*disp_id] = entry;
+                            overridden.push(*disp_id);
                         }
                         Some(Property::Virtual { get, .. }) => {
                             let disp_id = method_table.len();
@@ -411,6 +563,7 @@ impl<'gc> VTable<'gc> {
                             }
 
                             method_table[*disp_id] = entry;
+                            overridden.push(*disp_id);
                         }
                         Some(Property::Virtual { set, .. }) => {
                             let disp_id = method_table.len();
@@ -526,10 +679,18 @@ impl<'gc> VTable<'gc> {
             scope,
             protected_namespace: defining_class_def.protected_namespace(),
             resolved_traits,
+            flattened_traits: Lock::new(None),
             slot_metadata_table,
             disp_metadata_table,
             slot_table: slot_table.into_boxed_slice(),
-            method_table: method_table.into_boxed_slice(),
+            method_table: if *COPY.get_or_init(|| std::env::var_os("RUFFLE_COPY_TRAITS").is_some())
+            {
+                // `RUFFLE_COPY_TRAITS` copies the superclass's methods too, as before.
+                MethodTable::new(None, method_table, Vec::new())
+            } else {
+                MethodTable::new(base_methods, method_table, overridden)
+            },
+            flattened_methods: Lock::new(None),
         })
     }
 
@@ -597,8 +758,11 @@ impl<'gc> VTable<'gc> {
         )
     }
 
-    pub fn public_properties(self) -> impl Iterator<Item = (AvmString<'gc>, Property)> {
-        self.resolved_traits()
+    pub fn public_properties(
+        self,
+        mc: &Mutation<'gc>,
+    ) -> impl Iterator<Item = (AvmString<'gc>, Property)> {
+        self.resolved_traits(mc)
             .iter()
             .filter(|(_, ns, _)| ns.is_public())
             .map(|(name, _, prop)| (name, *prop))

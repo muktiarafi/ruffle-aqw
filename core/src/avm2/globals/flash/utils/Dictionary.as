@@ -8,9 +8,11 @@ package flash.utils {
         };
         prototype.setPropertyIsEnumerable("toJSON", false);
 
+        private native function enableWeakKeys():void;
+
         public function Dictionary(weakKeys:Boolean = false) {
             if (weakKeys) {
-                stub_constructor("flash.utils.Dictionary", "with weak keys");
+                enableWeakKeys();
             }
         }
     }

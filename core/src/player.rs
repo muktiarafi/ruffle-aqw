@@ -145,6 +145,13 @@ pub struct MouseData<'gc> {
     /// while the drag is still active; this flag makes the nested call a
     /// no-op instead of recursing until stack overflow.
     pub updating_drop_target: bool,
+
+    /// AQW build: `hovered` and its ancestors, as they were when it became hovered.
+    pub aqw_hovered_chain: Vec<DisplayObject<'gc>>,
+
+    /// AQW build: the previous `aqw_hovered_chain`, for the `RollOut` being dispatched (see
+    /// `TInteractiveObject::event_dispatch_to_avm2`).
+    pub aqw_rollout_chain: Vec<DisplayObject<'gc>>,
 }
 
 impl<'gc> MouseData<'gc> {
@@ -173,6 +180,9 @@ struct GcRootData<'gc> {
     root_swf: SwfMovie<'gc>,
 
     library: Library<'gc>,
+
+    /// AQW build: frame interpolation's recorded picture (see `replay`).
+    replay: crate::display_object::replay::Saved<'gc>,
 
     /// The root of the display object hierarchy.
     ///
@@ -366,6 +376,11 @@ pub struct Player {
     /// and compensate for small lags by "catching up" (up to MAX_FRAMES_PER_TICK).
     frame_accumulator: FloatDuration,
     recent_run_frame_timings: VecDeque<f64>,
+    /// AQW build: recent `render` durations in ms, so catch-up only runs extra frames when
+    /// they still fit in the frame budget alongside drawing.
+    recent_render_timings: VecDeque<f64>,
+    /// Total SWF frames run, so the frontend can tell which ticks actually ran a frame.
+    frames_run: u64,
 
     /// Faked time passage for fooling hand-written busy-loop FPS limiters.
     time_offset: u32,
@@ -518,16 +533,19 @@ impl Player {
     /// This logic is far from perfect, as it doesn't take into account
     /// that things like rendering also take time. But for now it's good enough.
     fn max_frames_per_tick(&self) -> u32 {
-        const MAX_FRAMES_PER_TICK: u32 = 5;
-
+        // AQW build: catch up by at most `catchup_frames()` extra frames (default 1), and only
+        // when running them plus one render still fits in a frame. Stock Ruffle catches up by
+        // up to 4 frames and ignores render time, so heavy scenes visibly skip several frames
+        // at once while the in-game counter still says 24 FPS.
+        let max_frames = 1 + catchup_frames();
         if self.recent_run_frame_timings.is_empty() {
-            5
-        } else {
-            let frame_time = self.frame_time(1000.0);
-            let average_run_frame_time = self.recent_run_frame_timings.iter().sum::<f64>()
-                / self.recent_run_frame_timings.len() as f64;
-            ((frame_time / average_run_frame_time) as u32).clamp(1, MAX_FRAMES_PER_TICK)
+            return max_frames;
         }
+        let average =
+            |timings: &VecDeque<f64>| timings.iter().sum::<f64>() / timings.len().max(1) as f64;
+        let average_run_frame_time = average(&self.recent_run_frame_timings).max(0.1);
+        let budget = self.frame_time(1000.0) - average(&self.recent_render_timings);
+        ((budget / average_run_frame_time) as u32).clamp(1, max_frames)
     }
 
     fn add_frame_timing(&mut self, elapsed: f64) {
@@ -563,6 +581,22 @@ impl Player {
         let mut frame = 0;
 
         while frame < max_frames_per_tick && self.frame_accumulator >= frame_duration {
+            // AQW build (`RUFFLE_TEST_STOP_AT_FRAME=n`, testing): the movie runs its first n
+            // frames and no more, so two runs of a moving scene can be compared at the same
+            // frame (time goes on; pictures are still drawn). And no frame runs before the
+            // one before it was drawn: on a busy machine two frames can run between two
+            // pictures, and what frame interpolation draws next depends on which frames it
+            // saw.
+            if let Some(stop) = stop_at_frame() {
+                if self.frames_run >= stop {
+                    self.frame_accumulator -= frame_duration;
+                    frame += 1;
+                    continue;
+                }
+                if self.needs_render && self.frames_run > 0 {
+                    break;
+                }
+            }
             let timer = Instant::now();
             self.run_frame();
             let elapsed = timer.elapsed().as_millis() as f64;
@@ -571,6 +605,8 @@ impl Player {
 
             self.frame_accumulator -= frame_duration;
             frame += 1;
+            self.frames_run += 1;
+            self.add_gc_pressure();
             // The script probably tried implementing an FPS limiter with a busy loop.
             // We fooled the busy loop by pretending that more time has passed that actually did.
             // Then we need to actually pass this time, by decreasing frame_accumulator
@@ -957,6 +993,174 @@ impl Player {
         self.needs_render
     }
 
+    /// AQW build: gc-arena only collects in proportion to new allocations and sleeps until the
+    /// heap grows by half, so with AQW's large, slowly-growing heap a cycle takes minutes. Until
+    /// a cycle finishes, every removed-but-unreferenced clip (avatars of players who left,
+    /// closed inventory icons) stays on the orphan list and is constructed and run on every
+    /// goto - tens of thousands of objects after 10 minutes of play. Adding steady debt per
+    /// frame finishes a cycle in about `gc_cycle_seconds()` regardless of allocation rate; it
+    /// only changes *when* garbage is freed.
+    fn add_gc_pressure(&self) {
+        let seconds = gc_cycle_seconds();
+        if seconds <= 0.0 {
+            return;
+        }
+        // A full cycle costs roughly (mark + trace + keep) work per live `Gc` with the default
+        // pacing: 0.1 + 0.4 + 0.05.
+        const CYCLE_WORK_PER_GC: f64 = 0.55;
+        let frames_per_cycle = (seconds * self.frame_rate).max(1.0);
+        let arena = self.gc_arena.borrow();
+        let metrics = arena.metrics();
+        metrics.adjust_debt(metrics.total_gc_count() as f64 * CYCLE_WORK_PER_GC / frames_per_cycle);
+    }
+
+    /// AQW build: logs the `top` kinds of GC values there are most of (AS3 objects by class),
+    /// to find what grows in long sessions. Walks the whole heap, so it takes a moment.
+    pub fn log_heap_census(&mut self, top: usize) {
+        let started = Instant::now();
+        let counts = self
+            .gc_arena
+            .borrow()
+            .mutate(|_, root| crate::aqw_retention::census(root));
+        let total: u64 = counts.values().sum();
+        let mut counts: Vec<(String, u64)> = counts.into_iter().collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        counts.truncate(top);
+        tracing::warn!(
+            target: "ruffle_aqw_perf",
+            "heap census: {total} reachable ({:.0} ms); most: {counts:?}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    /// AQW build: logs what keeps up to `max_targets` orphaned clips of AS3 class `class`
+    /// alive (oldest, middle, newest). Walks the whole heap once, so it takes a moment.
+    pub fn log_retention_paths(&mut self, class: &str, max_targets: usize) {
+        use crate::avm2::object::TObject;
+        let targets: Vec<*const ()> = self.mutate_with_update_context(|context| {
+            let mut found = Vec::new();
+            OrphanManager::each_orphan_obj(context, |orphan, _| {
+                if orphan
+                    .object2()
+                    .is_some_and(|o| o.instance_class().name().local_name().to_string() == class)
+                {
+                    found.push(orphan.as_ptr() as *const ());
+                }
+            });
+            let n = found.len();
+            let mut picked: Vec<_> = [0, n / 2, n.saturating_sub(1)]
+                .into_iter()
+                .filter(|&i| i < n)
+                .map(|i| found[i])
+                .collect();
+            picked.dedup();
+            picked.truncate(max_targets);
+            picked
+        });
+        if targets.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        let paths = self
+            .gc_arena
+            .borrow()
+            .mutate(|_, root| crate::aqw_retention::retention_paths(root, &targets));
+        tracing::warn!(
+            target: "ruffle_aqw_perf",
+            "retention report for {} orphaned {class} ({:.0} ms):",
+            targets.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        for (i, path) in paths.iter().enumerate() {
+            for (depth, line) in path.iter().enumerate() {
+                tracing::warn!(target: "ruffle_aqw_perf", "  #{i} {depth:>3}: {line}");
+            }
+        }
+    }
+
+    /// AQW build, for the perf log: loaded SWF movies and live GC objects.
+    pub fn aqw_memory_report(&mut self) -> String {
+        let gc_objects = self.gc_arena.borrow().metrics().total_gc_count();
+        let movies =
+            self.mutate_with_update_context(|context| context.library.loaded_movie_count());
+        let freed = self.mutate_with_update_context(|context| context.library.freed_movie_count());
+        let (_, urls, total, distinct) =
+            self.mutate_with_update_context(|context| context.library.movie_data_stats());
+        let (parsed, shared) = crate::display_object::graphic::shared_shapes::counts();
+        // (How the freeing of unused libraries is doing: tested and found in use so far, the
+        // GC cycles so far and the longest end of a cycle since the last line.)
+        let (tested, in_use) = crate::library::library_gc_counts();
+        let (longest, _, cycles) = gc_finalize_micros(true);
+        // (Frame scripts of clips put on the stage between frames, see
+        // `frame_lifecycle::early_scripts`: run early so far, in how many goes, and clips drawn
+        // with a script still waiting.)
+        let (early_runs, early_scripts, drawn_waiting) =
+            crate::frame_lifecycle::early_scripts::counts();
+        let (early_walks, early_micros) = crate::frame_lifecycle::early_scripts::walks();
+        let (marks_scripts, marks_exit, marks_idle) =
+            crate::frame_lifecycle::early_scripts::marks();
+        const MB: f64 = 1024.0 * 1024.0;
+        format!(
+            "{movies} loaded SWFs ({freed} freed so far, {tested} tested, {in_use} found in use; {urls} distinct URLs; SWF data {:.0} MB, {:.0} MB distinct; shape tags parsed {parsed}, shared {shared}), {gc_objects} GC objects ({cycles} GC cycles, longest step at a cycle's end {:.1} ms); frame scripts run early {early_scripts} in {early_runs} goes ({early_walks} looks, {:.0} ms in all; asked for in the script phase {marks_scripts}, the exit phase {marks_exit}, between frames {marks_idle}), clips drawn before theirs {drawn_waiting}",
+            total as f64 / MB,
+            distinct as f64 / MB,
+            longest as f64 / 1000.0,
+            early_micros as f64 / 1000.0
+        )
+    }
+
+    /// AQW build, for the perf log: sharp copies of small snapshots made so far and the draws
+    /// given to them (see `bitmap_data::Sharp`); `None` while the switch is off.
+    pub fn sharp_snapshot_counts() -> Option<(u64, u64)> {
+        use crate::bitmap::bitmap_data::Sharp;
+        Sharp::enabled().then(Sharp::stats)
+    }
+
+    /// AQW build, for the perf log: `useWeakReference` listeners registered so far
+    /// (method closures, anonymous closures).
+    pub fn weak_listener_counts() -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            crate::avm2::WEAK_LISTENERS.load(Relaxed),
+            crate::avm2::WEAK_ANON_LISTENERS.load(Relaxed),
+        )
+    }
+
+    pub fn frames_run(&self) -> u64 {
+        self.frames_run
+    }
+
+    /// AQW build, for the perf log: (live orphans, display objects on stage, display objects
+    /// under orphans, the most common orphan AS3 classes). Every goto walks all of them, so
+    /// growth here slows the game down.
+    pub fn display_object_counts(&mut self) -> (usize, usize, usize, Vec<(String, usize)>) {
+        use crate::avm2::object::TObject;
+        fn count(object: DisplayObject<'_>) -> usize {
+            1 + object
+                .as_container()
+                .map(|c| c.iter_render_list().map(count).sum())
+                .unwrap_or(0)
+        }
+        self.mutate_with_update_context(|context| {
+            let on_stage = count(context.stage.into());
+            let (mut orphans, mut under_orphans) = (0, 0);
+            let mut classes: HashMap<String, usize> = HashMap::new();
+            OrphanManager::each_orphan_obj(context, |orphan, _| {
+                orphans += 1;
+                under_orphans += count(orphan);
+                let class = orphan.object2().map_or_else(
+                    || "<no AS3 object>".to_string(),
+                    |object| object.instance_class().name().local_name().to_string(),
+                );
+                *classes.entry(class).or_default() += 1;
+            });
+            let mut classes: Vec<_> = classes.into_iter().collect();
+            classes.sort_by(|a, b| b.1.cmp(&a.1));
+            classes.truncate(5);
+            (orphans, on_stage, under_orphans, classes)
+        })
+    }
+
     pub fn background_color(&mut self) -> Option<Color> {
         self.mutate_with_update_context(|context| context.stage.background_color())
     }
@@ -993,6 +1197,8 @@ impl Player {
 
         // Flash Player renders right away when the viewport is resized,
         // without waiting for the next frame.
+        // AQW build: the next picture is for the new size (with frame interpolation it would
+        // be drawn from the last one recorded, for the old size, see `replay::Saved::plan`).
         self.needs_render = true;
     }
 
@@ -1071,6 +1277,22 @@ impl Player {
     }
 
     fn handle_focus_event(&mut self, event: PlayerEvent) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.input.clear_keys();
+            self.mutate_with_update_context(|context| {
+                let event_name = match event {
+                    PlayerEvent::FocusLost => "deactivate",
+                    PlayerEvent::FocusGained => "activate",
+                    _ => return,
+                };
+                if let Some(stage) = context.stage.object2() {
+                    let evt = Avm2EventObject::bare_default_event(context, event_name);
+                    Avm2::dispatch_event(context, evt, stage.into());
+                }
+            });
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if let PlayerEvent::FocusLost = event {
             self.mutate_with_update_context(|context| {
                 let focus_tracker = context.focus_tracker;
@@ -1246,6 +1468,18 @@ impl Player {
                 && context.stage.handle_clip_event(context, clip_event) == ClipEventResult::Handled
             {
                 player_event_handled = true;
+            }
+
+            // AQW build: the broadcast above skips everything inside clips with
+            // `mouseEnabled = false`, but in AS3 that only affects the clip itself. A text field
+            // being drag-selected needs the moves to extend its selection: AQW's chat box sits
+            // inside such clips, so its text couldn't be highlighted. Only the pressed text
+            // field gets the move (extending a selection twice to the same spot is harmless).
+            if matches!(clip_event, Some(ClipEvent::MouseMove))
+                && let Some(pressed) = context.mouse_data.pressed
+                && pressed.as_displayobject().as_edit_text().is_some()
+            {
+                pressed.event_dispatch(context, ClipEvent::MouseMove);
             }
 
             // Fire event listener on appropriate object
@@ -1509,7 +1743,20 @@ impl Player {
                 && changed_mouse_buttons.is_empty()
                 && context.mouse_data.hovered.is_some();
 
-            let new_over_object = if mouse_in_stage {
+            // AQW build: the pick walks every object under the stage (a guild's member list
+            // of 773 rows: half of each frame's time), and `update` asks for it after every
+            // frame and timer. With the mouse idle over something that is still there, its
+            // result is used nowhere below (`skip_mouse_hover` stays true, nothing reads
+            // `new_over_object`), so it isn't done. `RUFFLE_EAGER_PICK` (testing) always
+            // picks, as before.
+            let pick_unused = skip_mouse_hover
+                && !aqw_eager_pick()
+                && context.mouse_data.hovered.is_some_and(|hovered| {
+                    let hovered = hovered.as_displayobject();
+                    hovered.visible()
+                        && (hovered.movie().is_action_script_3() || !hovered.avm1_removed())
+                });
+            let new_over_object = if mouse_in_stage && !pick_unused {
                 run_mouse_pick(context, true)
             } else {
                 None
@@ -1601,6 +1848,19 @@ impl Player {
             if !skip_mouse_hover
                 && !InteractiveObject::option_ptr_eq(cur_over_object, new_over_object)
             {
+                if aqw_pick_log_enabled() {
+                    aqw_log_hover(cur_over_object, new_over_object);
+                }
+                // AQW build: remember the new hovered object's ancestors now, while it's still
+                // attached (see `aqw_rollout_chain`).
+                let mut new_chain = Vec::new();
+                let mut node = new_over_object.map(|o| o.as_displayobject());
+                while let Some(object) = node {
+                    new_chain.push(object);
+                    node = object.parent();
+                }
+                context.mouse_data.aqw_rollout_chain =
+                    std::mem::replace(&mut context.mouse_data.aqw_hovered_chain, new_chain);
                 // If the mouse button is down, the object the user clicked on grabs the focus
                 // and fires "drag" events.
                 if context.input.is_mouse_down(MouseButton::Left) {
@@ -1739,6 +1999,9 @@ impl Player {
                         MouseButton::Middle => ClipEvent::MiddlePress,
                         _ => unreachable!(),
                     };
+                    if button == MouseButton::Left && aqw_pick_log_enabled() {
+                        aqw_log_press(context);
+                    }
                     // Pressed on a hovered object.
                     if let Some(over_object) = context.mouse_data.hovered {
                         events.push((over_object, event));
@@ -1992,6 +2255,7 @@ impl Player {
 
     #[instrument(level = "debug", skip_all)]
     pub fn run_frame(&mut self) {
+        crate::display_object::interp::new_frame();
         let frame_time = self.frame_time(750_000_000.0);
         let frame_time = Duration::from_nanos(frame_time as u64);
         let (mut execution_limit, may_execute_while_streaming) = match self.load_behavior {
@@ -2026,10 +2290,21 @@ impl Player {
         });
 
         self.needs_render = true;
+        crate::display_object::interp::frame_finished();
     }
 
     #[instrument(level = "debug", skip_all)]
     pub fn render(&mut self) {
+        let started = Instant::now();
+        self.render_inner();
+        self.recent_render_timings
+            .push_back(started.elapsed().as_secs_f64() * 1000.0);
+        if self.recent_render_timings.len() > 10 {
+            self.recent_render_timings.pop_front();
+        }
+    }
+
+    fn render_inner(&mut self) {
         let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
 
         if invalidated {
@@ -2038,14 +2313,35 @@ impl Player {
                 stage.broadcast_render(context);
             });
         }
+        // AQW build: clips put on the stage since the last frame by code that did not come
+        // through `update` (a finished load) run their first frame scripts before they are
+        // drawn (see `frame_lifecycle::early_scripts`; `update` does it).
+        if crate::frame_lifecycle::early_scripts::waiting() {
+            self.update(|_| {});
+        }
 
         let mut background_color = Color::WHITE;
 
+        // AQW build: the clock shapes are stamped with when drawn (see `tessellation_cache`).
+        crate::tessellation_cache::set_clock(self.start_time.elapsed().as_secs() as u32);
+        // AQW build: frame interpolation blends objects' transforms while the stage is walked.
+        crate::display_object::interp::begin_render(self.frame_duration().as_millis());
+        let walk_started = Instant::now();
         let (cache_draws, commands) = self.enter_arena_mut(|gc_context, gc_root, this| {
             let stage = gc_root.stage;
 
+            // AQW build: with frame interpolation, the picture may be drawn from the last one
+            // recorded instead of walking the stage (see `replay`).
+            use crate::display_object::replay::Plan;
+            let (mut recorder, program) = match gc_root.replay.plan(this.needs_render) {
+                Plan::Walk => (None, None),
+                Plan::Record(recorder) => (Some(recorder), None),
+                Plan::Replay(program) => (None, Some(program)),
+            };
+
             let mut cache_draws = vec![];
             let mut render_context = RenderContext {
+                recorder: recorder.as_mut(),
                 renderer: this.renderer.deref_mut(),
                 commands: CommandList::new(),
                 cache_draws: &mut cache_draws,
@@ -2058,7 +2354,23 @@ impl Player {
                 stage,
             };
 
-            stage.render_viewport(&mut render_context);
+            // AQW build: shapes this frame draws for the first time are tessellated together,
+            // in parallel, once the frame's commands are built (see `deferred_shapes`).
+            let deferred_shapes =
+                crate::display_object::graphic::deferred_shapes::Scope::begin();
+
+            if let Some(program) = program {
+                gc_root
+                    .replay
+                    .replay(program, &mut render_context, |context| {
+                        stage.render_viewport(context)
+                    });
+            } else {
+                stage.render_viewport(&mut render_context);
+            }
+            if let Some(recorder) = render_context.recorder.take() {
+                gc_root.replay.recorded(recorder, &render_context.commands);
+            }
 
             #[cfg(feature = "egui")]
             {
@@ -2066,6 +2378,13 @@ impl Player {
                     .borrow_mut()
                     .draw_debug_rects(&mut render_context, gc_root.dynamic_root);
             }
+
+            deferred_shapes.resolve(
+                render_context.library,
+                render_context.renderer,
+                &mut render_context.commands,
+                render_context.cache_draws,
+            );
 
             background_color =
                 if stage.window_mode() != WindowMode::Transparent || stage.is_fullscreen() {
@@ -2081,6 +2400,8 @@ impl Player {
             (cache_draws, commands)
         });
 
+        crate::display_object::interp::end_render();
+        crate::add_render_walk_micros(walk_started.elapsed().as_micros() as u64);
         self.renderer
             .submit_frame(background_color, commands, cache_draws);
 
@@ -2373,6 +2694,9 @@ impl Player {
             let rval = func(context);
 
             Self::run_actions(context);
+            // AQW build: what this put on the stage between frames runs its first frame
+            // scripts before a picture is drawn.
+            crate::frame_lifecycle::early_scripts::run(context);
 
             rval
         });
@@ -2384,9 +2708,138 @@ impl Player {
         self.update_mouse_state(EnumSet::empty(), false, &mut false);
 
         // GC
-        self.gc_arena.borrow_mut().collect_debt();
+        Self::collect_garbage(&mut self.gc_arena.borrow_mut());
 
         rval
+    }
+
+    /// Pays off GC debt. AQW build: every cycle stops once fully marked so weak-keyed
+    /// `Dictionary`s can keep entries whose keys are alive and drop the rest (ephemerons)
+    /// before anything is swept; `collect_debt` alone could run straight through to sweeping.
+    /// Unused SWF libraries are freed at the same point (`Library::finalize_movie_libraries`).
+    ///
+    /// What happens in one go here, inside one frame, is a pause, and it was a long one with
+    /// many SWFs loaded (measured with 4,825 of them: 13 ms a cycle while 53 libraries were
+    /// tested, 57 ms with 1,150), for two reasons, both gone now:
+    /// - the last step borrowed the root data mutably through the write barrier, which made
+    ///   the collector trace all of it once more before sweeping: every character of every
+    ///   library (10 ms). That step only removes things, which needs no barrier;
+    /// - what only a tested library reaches was marked at once when the library was found in
+    ///   use (39 us a library). Now the cycle goes back to marking over frames, like
+    ///   everything else it marks, and comes here again when that is done
+    ///   (`RUFFLE_LIBRARY_REVIVE_AT_ONCE` = as it was).
+    fn collect_garbage(arena: &mut GcArena) {
+        use gc_arena::arena::CollectionPhase;
+        let finalize = Self::finalize_marked;
+        if arena.collection_phase() != CollectionPhase::Sweeping {
+            let Some(marked) = arena.mark_debt() else {
+                return;
+            };
+            // (Timed, for the log and the load benchmark.)
+            let mut timed = FinalizeTimer(Instant::now(), false);
+            let (mut revived, libraries_revived) = finalize(marked);
+            if libraries_revived && !revive_at_once() {
+                // The libraries found in use are gray now. Nothing was removed and nothing is
+                // swept while marking goes on, and the tests run again in full when it is done:
+                // a library that comes into use meanwhile is found then.
+                return;
+            }
+            while revived {
+                let marked = arena
+                    .finish_marking()
+                    .expect("finish_marking always reaches the Marked phase");
+                revived = finalize(marked).0;
+            }
+            // Sweep right away: while the arena stays merely "marked", upgrading a weak pointer
+            // (e.g. the orphan list running a removed clip's frame scripts) resurrects a dead
+            // object — one whose movie library was just removed above, which crashed on the
+            // library lookup. Once sweeping, dead objects can no longer be upgraded.
+            if let Some(marked) = arena.finish_marking() {
+                marked.start_sweeping();
+            }
+            timed.1 = true;
+        }
+        let sweeping = arena.collection_phase() == CollectionPhase::Sweeping;
+        arena.cycle_debt();
+        if sweeping && arena.collection_phase() != CollectionPhase::Sweeping {
+            Self::forget_freed_addresses(arena);
+        }
+    }
+
+    /// AQW build: see `Library::forget_freed_addresses` (called when a sweep is through).
+    fn forget_freed_addresses(arena: &mut GcArena) {
+        arena.mutate(|mc, root| root.data.borrow_mut(mc).library.forget_freed_addresses());
+    }
+
+    /// AQW build: what `collect_garbage` does with a fully marked arena: the tests of the
+    /// libraries and the weak dictionaries, and, in a round that revived nothing, the removal
+    /// of what is unused. -> (something was revived, of which libraries)
+    fn finalize_marked(
+        marked: gc_arena::arena::MarkedArena<'_, Rootable![GcRoot<'_>]>,
+    ) -> (bool, bool) {
+        marked.finalize(|fc, root| {
+            let (revived, libraries_revived) = {
+                let data = root.data.borrow();
+                let mut anchored = fnv::FnvHashSet::default();
+                data.avm2.movie_anchors(fc, &mut anchored);
+                let libraries_revived = data.library.finalize_movie_libraries(fc, &mut anchored);
+                (
+                    data.avm2.finalize_weak_dictionaries(fc, !libraries_revived)
+                        || libraries_revived,
+                    libraries_revived,
+                )
+            };
+            if !revived {
+                // SAFETY: nothing below stores a `Gc` pointer anywhere: libraries, class
+                // registry entries and anchors are removed, and the libraries' plain test
+                // marks are set. Without new pointers the root data needs no write barrier
+                // (which would have it traced again, see `collect_garbage`).
+                let mut data = unsafe { root.data.as_ref_cell() }.borrow_mut();
+                let root_movie = data.root_swf;
+                data.library.sweep_movie_libraries(fc, root_movie);
+                data.avm2.prune_movie_anchors(fc);
+            }
+            (revived, libraries_revived)
+        })
+    }
+
+    /// AQW build: one whole GC cycle, now: what is left of the marking, the end of the cycle
+    /// as `collect_garbage` does it (everything in one go), and all of the sweep.
+    fn finish_gc_cycle(arena: &mut GcArena) {
+        use gc_arena::arena::CollectionPhase;
+        if arena.collection_phase() != CollectionPhase::Sweeping {
+            let mut revived = true;
+            while revived {
+                let marked = arena
+                    .finish_marking()
+                    .expect("finish_marking always reaches the Marked phase");
+                revived = Self::finalize_marked(marked).0;
+            }
+            if let Some(marked) = arena.finish_marking() {
+                marked.start_sweeping();
+            }
+        }
+        if arena.collection_phase() == CollectionPhase::Sweeping {
+            arena.finish_cycle();
+            Self::forget_freed_addresses(arena);
+        }
+    }
+
+    /// AQW build, for "Free memory now": every library nothing uses is freed now, with all
+    /// other garbage, instead of over the next cycles. Two whole cycles: the first ends by
+    /// picking every library for its test, the second tests them and sweeps what was unused.
+    /// A pause (tens to a few hundred milliseconds with a big heap): only for a click.
+    /// -> (libraries freed, milliseconds)
+    pub fn free_unused_libraries_now(&mut self) -> (usize, f64) {
+        let started = Instant::now();
+        let freed_before =
+            self.mutate_with_update_context(|context| context.library.freed_movie_count());
+        self.mutate_with_update_context(|context| context.library.test_all_libraries_next());
+        for _ in 0..2 {
+            Self::finish_gc_cycle(&mut self.gc_arena.borrow_mut());
+        }
+        let freed = self.mutate_with_update_context(|context| context.library.freed_movie_count());
+        (freed - freed_before, started.elapsed().as_secs_f64() * 1000.0)
     }
 
     pub fn flush_shared_objects(&mut self) {
@@ -2939,6 +3392,7 @@ impl PlayerBuilder {
         let fake_movie = SwfMovie::new(gc_context, SwfMovieData::empty(player_version, None));
 
         let data = GcRootData {
+            replay: Default::default(),
             audio_manager: AudioManager::new(),
             action_queue: ActionQueue::new(),
             avm1,
@@ -2961,6 +3415,8 @@ impl PlayerBuilder {
                 middle_pressed: None,
                 forced_cursor: None,
                 updating_drop_target: false,
+                aqw_hovered_chain: Vec::new(),
+                aqw_rollout_chain: Vec::new(),
             },
             avm1_shared_objects: HashMap::new(),
             avm2_shared_objects: HashMap::new(),
@@ -3043,6 +3499,8 @@ impl PlayerBuilder {
                 frame_phase: Default::default(),
                 frame_accumulator: FloatDuration::ZERO,
                 recent_run_frame_timings: VecDeque::with_capacity(10),
+                recent_render_timings: VecDeque::with_capacity(10),
+                frames_run: 0,
                 start_time: Instant::now(),
                 time_offset: 0,
                 time_til_next_timer: None,
@@ -3214,6 +3672,108 @@ fn run_mouse_pick<'gc>(
     context: &mut UpdateContext<'gc>,
     require_button_mode: bool,
 ) -> Option<InteractiveObject<'gc>> {
+    // AQW build (testing): how long picks take and what they find (`RUFFLE_PICK_STATS`,
+    // `RUFFLE_PICK_TRACE`).
+    if !aqw_pick_stats::wanted() {
+        return run_mouse_pick_inner(context, require_button_mode);
+    }
+    let started = std::time::Instant::now();
+    let found = run_mouse_pick_inner(context, require_button_mode);
+    aqw_pick_stats::picked(started.elapsed(), *context.mouse_position, found);
+    found
+}
+
+/// AQW build (testing): `RUFFLE_PICK_STATS` logs every 5 seconds how many mouse picks ran,
+/// how long they took and what `display_object::pick_notes` did in them; `RUFFLE_PICK_TRACE`
+/// logs each pick's position and result when either differs from the pick before (for
+/// comparing two runs of a still scene with the test pointer).
+mod aqw_pick_stats {
+    use crate::display_object::InteractiveObject;
+    use crate::display_object::pick_notes;
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+    use swf::{Point, Twips};
+
+    fn stats() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var_os("RUFFLE_PICK_STATS").is_some()
+                || pick_notes::verify() != pick_notes::Verify::Off
+        })
+    }
+
+    fn trace() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("RUFFLE_PICK_TRACE").is_some())
+    }
+
+    pub fn wanted() -> bool {
+        stats() || trace()
+    }
+
+    #[derive(Default)]
+    struct Window {
+        since: Option<Instant>,
+        picks: u32,
+        total: Duration,
+        longest: Duration,
+        last: String,
+    }
+
+    thread_local! {
+        static WINDOW: RefCell<Window> = RefCell::new(Window::default());
+    }
+
+    pub fn picked(took: Duration, point: Point<Twips>, found: Option<InteractiveObject<'_>>) {
+        WINDOW.with(|window| {
+            let mut window = window.borrow_mut();
+            if trace() {
+                let line = format!(
+                    "pick at ({:.1}, {:.1}) -> {}",
+                    point.x.to_pixels(),
+                    point.y.to_pixels(),
+                    super::aqw_chain(found)
+                );
+                if line != window.last {
+                    tracing::info!(target: "ruffle_aqw_perf", "{line}");
+                    window.last = line;
+                }
+            }
+            if !stats() {
+                return;
+            }
+            let now = Instant::now();
+            let since = *window.since.get_or_insert(now);
+            window.picks += 1;
+            window.total += took;
+            window.longest = window.longest.max(took);
+            if now.duration_since(since) >= Duration::from_secs(5) {
+                let [skipped, entered_plain, entered_other, rebuilt, stale, mismatches] =
+                    pick_notes::take_counters();
+                tracing::info!(
+                    target: "ruffle_aqw_perf",
+                    "mouse picks: {} in {:.1} s, avg {:.0} us, longest {:.0} us; branches skipped {skipped}, plain ones entered {entered_plain}, other clips entered {entered_other}, notes rebuilt {rebuilt}; notes out of date {stale}, skipped branches that would have been hit {mismatches}",
+                    window.picks,
+                    now.duration_since(since).as_secs_f64(),
+                    window.total.as_secs_f64() * 1e6 / f64::from(window.picks.max(1)),
+                    window.longest.as_secs_f64() * 1e6,
+                );
+                let last = std::mem::take(&mut window.last);
+                *window = Window {
+                    since: Some(now),
+                    last,
+                    ..Default::default()
+                };
+            }
+        });
+    }
+}
+
+fn run_mouse_pick_inner<'gc>(
+    context: &mut UpdateContext<'gc>,
+    require_button_mode: bool,
+) -> Option<InteractiveObject<'gc>> {
+    let _matrices = crate::display_object::pick_matrix_cache::PickMatrixCache::new();
     context.stage.iter_render_list().rev().find_map(|level| {
         level.as_interactive().and_then(|l| {
             if l.as_displayobject().movie().is_action_script_3() {
@@ -3281,4 +3841,291 @@ pub enum PlayerMode {
 
     /// Represents the debug version of Flash Player, i.e. flashplayerdebugger.
     Debug,
+}
+
+/// AQW build: extra frames `tick` may run to catch up after a late frame, from
+/// `RUFFLE_CATCHUP_FRAMES` (default 1; 0 = draw every frame and let the game slow down instead,
+/// 4 = stock Ruffle's limit).
+fn catchup_frames() -> u32 {
+    static FRAMES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FRAMES.get_or_init(|| {
+        std::env::var("RUFFLE_CATCHUP_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+    })
+}
+
+/// AQW build: the longest and the summed time of the steps at the ends of the GC's cycles so
+/// far, in microseconds, and how many cycles there were (see `Player::collect_garbage`: those
+/// steps are what a cycle cannot spread over frames).
+static FINALIZE_MICROS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// (Since when, and whether the cycle ended with this step.)
+struct FinalizeTimer(Instant, bool);
+
+impl Drop for FinalizeTimer {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let micros = self.0.elapsed().as_micros() as u64;
+        FINALIZE_MICROS[0].fetch_max(micros, Relaxed);
+        FINALIZE_MICROS[1].fetch_add(micros, Relaxed);
+        if self.1 {
+            FINALIZE_MICROS[2].fetch_add(1, Relaxed);
+        }
+    }
+}
+
+/// AQW build: `RUFFLE_LIBRARY_REVIVE_AT_ONCE`: what the libraries found in use reach is marked
+/// in one go at the end of the cycle, as it was (see `Player::collect_garbage`).
+fn revive_at_once() -> bool {
+    static AT_ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AT_ONCE.get_or_init(|| std::env::var_os("RUFFLE_LIBRARY_REVIVE_AT_ONCE").is_some())
+}
+
+/// AQW build: (longest, summed) microseconds of the steps at the ends of the GC's cycles and
+/// the number of cycles, so far; `reset` starts the longest over (for a log's window).
+pub fn gc_finalize_micros(reset: bool) -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let longest = if reset {
+        FINALIZE_MICROS[0].swap(0, Relaxed)
+    } else {
+        FINALIZE_MICROS[0].load(Relaxed)
+    };
+    (longest, FINALIZE_MICROS[1].load(Relaxed), FINALIZE_MICROS[2].load(Relaxed))
+}
+
+/// AQW build: target seconds per full GC cycle (`RUFFLE_GC_CYCLE_SECONDS`, default 10; 0 = stock
+/// allocation-driven pacing).
+fn gc_cycle_seconds() -> f64 {
+    static SECONDS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SECONDS.get_or_init(|| {
+        std::env::var("RUFFLE_GC_CYCLE_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10.0)
+    })
+}
+
+/// AQW build (diagnostic): true when a `pick-log` file sits next to the player exe.
+fn aqw_pick_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("pick-log").exists()))
+            .unwrap_or(false)
+    })
+}
+
+/// AQW build: `RUFFLE_EAGER_PICK` (testing) looks up what is under the mouse after every
+/// frame and timer even when the answer can't be used (see `Player::update_mouse_state`).
+fn aqw_eager_pick() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RUFFLE_EAGER_PICK").is_some())
+}
+
+/// AQW build (diagnostic): logs what a left click landed on, and every text field under the
+/// mouse with the flags that decide whether it can be selected, to find out why AQW's chat
+/// text can't be drag-selected.
+fn aqw_log_press<'gc>(context: &mut UpdateContext<'gc>) {
+    use crate::avm2::object::TObject;
+    use crate::display_object::{
+        DisplayObject, HitTestOptions, TDisplayObject, TDisplayObjectContainer,
+    };
+    fn describe(object: DisplayObject<'_>) -> String {
+        let class = object.object2().map_or_else(
+            || "-".to_string(),
+            |o| o.instance_class().name().local_name().to_string(),
+        );
+        let name = object.name().map(|n| n.to_string()).unwrap_or_default();
+        let mouse = object
+            .as_interactive()
+            .map(|i| if i.mouse_enabled() { "" } else { " [mouseEnabled=false]" })
+            .unwrap_or("");
+        let children = object
+            .as_container()
+            .map(|c| if c.raw_container().mouse_children() { "" } else { " [mouseChildren=false]" })
+            .unwrap_or("");
+        format!("{class} '{name}'{mouse}{children}")
+    }
+    fn chain(mut object: Option<DisplayObject<'_>>) -> String {
+        let mut parts = Vec::new();
+        while let Some(o) = object {
+            parts.push(describe(o));
+            object = o.parent();
+        }
+        parts.join(" < ")
+    }
+    fn walk<'gc>(
+        context: &mut UpdateContext<'gc>,
+        object: DisplayObject<'gc>,
+        point: Point<Twips>,
+        found: &mut Vec<DisplayObject<'gc>>,
+    ) {
+        if !object.visible() {
+            return;
+        }
+        if let Some(text) = object.as_edit_text() {
+            if text.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK) {
+                found.push(object);
+            }
+        }
+        if let Some(container) = object.as_container() {
+            let children: Vec<_> = container.iter_render_list().collect();
+            for child in children {
+                walk(context, child, point, found);
+            }
+        }
+    }
+
+    let point = *context.mouse_position;
+    let hovered = context.mouse_data.hovered.map(|o| o.as_displayobject());
+    tracing::info!(
+        target: "ruffle_aqw_perf",
+        "press at ({:.0}, {:.0}) on: {}",
+        point.x.to_pixels(),
+        point.y.to_pixels(),
+        chain(hovered)
+    );
+
+    // The mouse listeners along the clicked path (alive / weak ones already collected), to see
+    // whether the click reaches anything that handles it.
+    let events = [
+        (istr!(context, "click"), "click"),
+        (istr!(context, "mouseDown"), "mouseDown"),
+        (istr!(context, "mouseUp"), "mouseUp"),
+    ];
+    let mut listeners = Vec::new();
+    let mut node = hovered;
+    while let Some(object) = node {
+        let list = object.object2().and_then(|o| {
+            crate::avm2::Object::from(o)
+                .get_slot(crate::avm2::globals::slots::flash_events_event_dispatcher::DISPATCH_LIST)
+                .as_object()
+        });
+        if let Some(list) = list.as_ref().and_then(|l| l.as_dispatch_mut(context.gc())) {
+            let counts: Vec<String> = events
+                .iter()
+                .filter_map(|&(event, name)| {
+                    let (alive, collected) = list.aqw_listener_counts(event);
+                    (alive + collected > 0).then(|| format!("{name} {alive}/{collected}"))
+                })
+                .collect();
+            if !counts.is_empty() {
+                listeners.push(format!("{} {}", describe(object), counts.join(" ")));
+            }
+        }
+        node = object.parent();
+    }
+    tracing::info!(
+        target: "ruffle_aqw_perf",
+        "  listeners on the path (alive/collected): {}",
+        if listeners.is_empty() { "none".to_string() } else { listeners.join("; ") }
+    );
+
+    // What is drawn under the mouse, topmost first, whatever its mouse flags (masks of clips are
+    // respected, timeline mask layers aren't): a click on empty space vs. on art the pick skipped.
+    fn drawn<'gc>(
+        context: &mut UpdateContext<'gc>,
+        object: DisplayObject<'gc>,
+        point: Point<Twips>,
+        found: &mut Vec<DisplayObject<'gc>>,
+    ) {
+        if found.len() >= 4
+            || !object.visible()
+            || object.maskee().is_some()
+            || object.clip_depth() > 0
+        {
+            return;
+        }
+        if let Some(masker) = object.masker()
+            && !masker.hit_test_shape(context, point, HitTestOptions::empty())
+        {
+            return;
+        }
+        if let Some(container) = object.as_container() {
+            let children: Vec<_> = container.iter_render_list().collect();
+            for child in children.into_iter().rev() {
+                drawn(context, child, point, found);
+            }
+        } else if object.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK) {
+            found.push(object);
+        }
+    }
+    let mut leaves = Vec::new();
+    drawn(context, context.stage.into(), point, &mut leaves);
+    for leaf in leaves {
+        let mut alpha = 1.0;
+        let mut node = Some(leaf);
+        while let Some(o) = node {
+            alpha *= o.alpha();
+            node = o.parent();
+        }
+        tracing::info!(
+            target: "ruffle_aqw_perf",
+            "  drawn under mouse (alpha {alpha:.2}): {}",
+            chain(Some(leaf))
+        );
+    }
+    let mut found = Vec::new();
+    walk(context, context.stage.into(), point, &mut found);
+    for object in found {
+        let text = object.as_edit_text().unwrap();
+        tracing::info!(
+            target: "ruffle_aqw_perf",
+            "  text field under mouse: selectable {}, editable {}, was_static {}, {} chars: {}",
+            text.is_selectable(),
+            text.is_editable(),
+            text.was_static(),
+            text.text_length(),
+            chain(Some(object))
+        );
+    }
+}
+
+/// AQW build (diagnostic): an object with its ancestors, as class and name.
+fn aqw_chain(object: Option<InteractiveObject<'_>>) -> String {
+    use crate::avm2::object::TObject;
+    use crate::display_object::{DisplayObject, TDisplayObject};
+    let mut parts = Vec::new();
+    let mut object: Option<DisplayObject<'_>> = object.map(|o| o.as_displayobject());
+    while let Some(o) = object {
+        if parts.len() == 5 {
+            parts.push("…".to_string());
+            break;
+        }
+        let class = o.object2().map_or_else(
+            || "-".to_string(),
+            |obj| obj.instance_class().name().local_name().to_string(),
+        );
+        let name = o.name().map(|n| n.to_string()).unwrap_or_default();
+        parts.push(format!("{class} '{name}'"));
+        object = o.parent();
+    }
+    parts.join(" < ")
+}
+
+/// AQW build (diagnostic): logs every change of the object under the mouse.
+fn aqw_log_hover(old: Option<InteractiveObject<'_>>, new: Option<InteractiveObject<'_>>) {
+    tracing::info!(
+        target: "ruffle_aqw_perf",
+        "hover: {} -> {}",
+        aqw_chain(old),
+        aqw_chain(new)
+    );
+}
+
+/// AQW build: see `Player::tick`.
+fn stop_at_frame() -> Option<u64> {
+    static STOP: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *STOP.get_or_init(|| {
+        std::env::var("RUFFLE_TEST_STOP_AT_FRAME")
+            .ok()
+            .and_then(|n| n.parse().ok())
+    })
 }

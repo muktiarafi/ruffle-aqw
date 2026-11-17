@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+**/*.sw?
+Cargo.lock
+.DS_Store
+.#*
+.dir-locals.el
+.envrc
+shell.nix
+flake.nix
+flake.lock

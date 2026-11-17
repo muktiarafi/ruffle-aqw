@@ -508,7 +508,38 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
         }
     }
 
+    /// AQW build: `resolve_font_inner`, logging once per distinct request which font it got
+    /// (target `ruffle_aqw_perf`), to track down text drawn in the wrong font.
     fn resolve_font(&mut self, span: &TextSpan) -> FontSet<'gc> {
+        let font_set = self.resolve_font_inner(span);
+        thread_local! {
+            static LOGGED: std::cell::RefCell<std::collections::HashSet<String>> =
+                std::cell::RefCell::new(std::collections::HashSet::new());
+        }
+        let key = format!(
+            "\"{}\" bold {} italic {} ({:?} text)",
+            span.font.face.to_utf8_lossy(),
+            span.style.bold,
+            span.style.italic,
+            self.font_type
+        );
+        let font = font_set.main_font();
+        let descriptor = font.descriptor();
+        let result = format!(
+            "{:?} font \"{}\" bold {} italic {}",
+            font.font_type(),
+            descriptor.name(),
+            descriptor.bold(),
+            descriptor.italic()
+        );
+        // Logged again if the same request later resolves to another font.
+        if LOGGED.with_borrow_mut(|logged| logged.insert(format!("{key} -> {result}"))) {
+            tracing::info!(target: "ruffle_aqw_perf", "font {key} -> {result}");
+        }
+        font_set
+    }
+
+    fn resolve_font_inner(&mut self, span: &TextSpan) -> FontSet<'gc> {
         fn new_empty_font<'gc>(
             context: &mut dyn LayoutContext<'gc>,
             span: &TextSpan,

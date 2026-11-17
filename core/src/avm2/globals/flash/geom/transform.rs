@@ -337,6 +337,19 @@ pub fn get_perspective_projection<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.as_object().unwrap();
 
+    // AQW build: a root never has a null PerspectiveProjection (see
+    // `MovieClip::set_perspective_projection`), but only the player's first movie gets its
+    // default; roots of loaded SWFs (AQW's game, loaded by its loader) stayed null. Adobe
+    // Animate's layer-effect code (`___LayerProp___`) reads `root.transform
+    // .perspectiveProjection.focalLength`, so on AQW items using layer effects it threw before
+    // copying each layer's filters, color transform and blend mode.
+    let display_object = get_display_object(this);
+    if display_object.base().perspective_projection().is_none()
+        && display_object.as_movie_clip().is_some_and(|clip| clip.is_root())
+    {
+        display_object.set_perspective_projection(None);
+    }
+
     if get_display_object(this)
         .base()
         .perspective_projection()

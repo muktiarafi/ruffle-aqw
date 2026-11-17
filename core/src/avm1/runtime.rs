@@ -470,9 +470,24 @@ impl<'gc> Avm1<'gc> {
         // Have to do this in two passes to avoid borrow-mut while already borrowed
         let mut out = Vec::new();
 
+        // AQW build: nothing was ever marked for it, so there is nothing to find (see
+        // `display_object::settle::note_pending_removal`).
+        use crate::display_object::settle;
+        let nothing_marked = settle::tracks_idle() && !settle::ever_pending_removal();
+        if nothing_marked && !settle::lean_verify() {
+            return;
+        }
+
         // Find objects to remove
         for level in context.stage.iter_render_list() {
             Self::find_display_objects_pending_removal(level, &mut out);
+        }
+        if nothing_marked && !out.is_empty() {
+            settle::violation(
+                "the search for objects pending removal",
+                "it found some",
+                format!("the stage ({} objects)", out.len()),
+            );
         }
 
         for &child in &out {

@@ -1,0 +1,54 @@
+version: 2
+
+jobs:
+  build:
+    docker:
+      - image: cimg/rust:1.95.0
+    steps:
+      - checkout
+      - run:
+          name: Setup Rust
+          command: |
+            rustup component add rustfmt
+            rustup toolchain uninstall nightly
+            rustup toolchain install nightly -c miri,rust-src
+      - run:
+          name: Version information
+          command: |
+            rustup --version
+            rustc --version
+            cargo --version
+            rustc +nightly --version
+            cargo +nightly --version
+      - run:
+          name: Calculate dependencies
+          command: cargo generate-lockfile
+      - restore_cache:
+          keys:
+            - cargo-cache-{{ arch }}-{{ checksum "Cargo.lock" }}
+      - run:
+          name: Check Formatting
+          command: |
+              rustfmt --version
+              cargo fmt --all -- --check --color=auto
+      - run:
+          name: Build all targets
+          command: cargo build --all --all-targets
+      - run:
+          name: Build no_std targets
+          command: |
+              cargo build --no-default-features
+      - run:
+          name: Run all tests
+          command: cargo test --all --all-features
+      - run:
+          name: Run all tests under miri
+          command: |
+            cargo +nightly miri test --all --tests --all-features -- --skip ui
+      - save_cache:
+          paths:
+            - /usr/local/cargo/registry
+            - target/debug/.fingerprint
+            - target/debug/build
+            - target/debug/deps
+          key: cargo-cache-{{ arch }}-{{ checksum "Cargo.lock" }}

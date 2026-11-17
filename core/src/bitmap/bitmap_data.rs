@@ -285,6 +285,11 @@ impl<'gc> BitmapData<'gc> {
         self.0.overwrite_cpu_pixels_from_gpu(mc)
     }
 
+    /// AQW build: see `BitmapRawData::sharp_scale`.
+    pub fn sharp_scale(&self, view: &ruffle_render::matrix::Matrix) -> Option<(f32, f32)> {
+        self.0.sharp_scale(view)
+    }
+
     pub fn read_area(
         &self,
         read_area: PixelRegion,
@@ -398,6 +403,10 @@ pub struct BitmapRawData<'gc> {
     #[collect(require_static)]
     dirty_state: DirtyState,
 
+    /// AQW build: this bitmap's sharp copy, if it has one (see `Sharp`).
+    #[collect(require_static)]
+    sharp: Sharp,
+
     /// Holds an egui texture handle, used for rendering this Bitmap in the debug ui.
     /// This is automatically set to `None` when the texture is updated (either from
     /// marking the CPU side dirty, or from performing a GPU -> CPU sync).
@@ -417,6 +426,71 @@ pub enum DirtyState {
     GpuModified(Box<dyn SyncHandle>, PixelRegion),
 }
 
+/// AQW build: the sharp copy of a small bitmap made by `BitmapData.draw`.
+///
+/// AQW shows a skill on cooldown as a darkened picture of its icon: `new BitmapData(50, 50)`,
+/// `draw(icon, null, a darkening colour transform)`, shown as a `Bitmap` behind the sweep. The
+/// window is two or three times the stage's size, so those 50 x 50 pixels are stretched to 110
+/// or 150: blocky, in Flash too, next to the icon itself, which is drawn from its shapes at
+/// the window's size. The aura icons are made the same way.
+///
+/// Such a bitmap gets a second texture, as much larger as the window is than the stage (4
+/// times at most), which is given every draw the bitmap is given, at that scale. A `Bitmap`
+/// shown enlarged on the stage draws from it (`BitmapRawDataWrapper::render`). The bitmap's
+/// own pixels and texture stay what they were: `getPixel`, `copyPixels`, filters, bitmap
+/// fills, a draw into another bitmap all see the 50 x 50 picture. And anything but a draw of
+/// a display object written to the bitmap ends the copy (`drop_sharp`): it could not follow.
+///
+/// Only for bitmaps of 8 to 128 pixels a side (a larger one drawn every frame would cost a
+/// second draw of that size each time), and only with `RUFFLE_SHARP_SNAPSHOTS` set.
+#[derive(Clone, Debug, Default)]
+pub enum Sharp {
+    /// No copy, and none can be made any more.
+    #[default]
+    None,
+    /// Every pixel still has the colour the bitmap was made with: a copy can start from it.
+    Blank(Color),
+    /// The copy and its size.
+    Copy {
+        handle: BitmapHandle,
+        width: u32,
+        height: u32,
+    },
+}
+
+impl Sharp {
+    /// The largest side a bitmap with a sharp copy may have, the smallest, and how many times
+    /// larger than the bitmap the copy may be.
+    const LARGEST: u32 = 128;
+    const SMALLEST: u32 = 8;
+    const MOST: f32 = 4.0;
+    /// A window less than this much larger than the stage gets no copies: little to gain.
+    const LEAST: f32 = 1.25;
+
+    pub fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("RUFFLE_SHARP_SNAPSHOTS").is_some())
+    }
+
+    fn for_new(width: u32, height: u32, fill: Color) -> Self {
+        let sides = Self::SMALLEST..=Self::LARGEST;
+        if Self::enabled() && sides.contains(&width) && sides.contains(&height) {
+            Sharp::Blank(fill)
+        } else {
+            Sharp::None
+        }
+    }
+
+    /// Copies made and draws given to copies since the start, for the log.
+    pub fn stats() -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (SHARP_COPIES.load(Relaxed), SHARP_DRAWS.load(Relaxed))
+    }
+}
+
+static SHARP_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SHARP_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 mod wrapper {
     use crate::avm2::object::BitmapDataObject;
     use crate::context::RenderContext;
@@ -429,7 +503,7 @@ mod wrapper {
     use ruffle_render::commands::CommandHandler;
     use std::cell::Ref;
 
-    use super::{BitmapRawData, DirtyState, copy_pixels_to_bitmapdata};
+    use super::{BitmapRawData, DirtyState, Sharp, copy_pixels_to_bitmapdata};
 
     /// A wrapper type that ensures that we always wait for a pending
     /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
@@ -485,6 +559,7 @@ mod wrapper {
                     avm2_object: None,
                     display_objects: vec![],
                     dirty_state: DirtyState::Clean,
+                    sharp: Sharp::None,
                     #[cfg(feature = "egui")]
                     egui_texture: Default::default(),
                 }
@@ -509,6 +584,7 @@ mod wrapper {
                 display_objects: vec![],
                 // We have no GPU texture, so there's no need to mark as dirty
                 dirty_state: DirtyState::Clean,
+                sharp: Sharp::None,
                 #[cfg(feature = "egui")]
                 egui_texture: Default::default(),
             }
@@ -636,11 +712,25 @@ mod wrapper {
         }
 
         pub fn dispose(&self, mc: &Mutation<'gc>) {
-            self.0.borrow_mut(mc).dispose();
+            let mut data = self.0.borrow_mut(mc);
+            data.dispose();
+            // AQW build: the bitmaps showing it draw nothing from now on (see
+            // `replay::lean_render`; nothing else tells them).
+            use crate::display_object::TDisplayObject as _;
+            for object in &data.display_objects {
+                if let Some(object) = object.upgrade(mc) {
+                    crate::display_object::replay::mark_dirty(&object.base());
+                }
+            }
         }
 
         pub fn init_object2(&self, mc: &Mutation<'gc>, object: BitmapDataObject<'gc>) {
             self.0.borrow_mut(mc).avm2_object = Some(object);
+        }
+
+        /// AQW build: see `BitmapRawData::sharp_scale`.
+        pub fn sharp_scale(&self, view: &ruffle_render::matrix::Matrix) -> Option<(f32, f32)> {
+            self.0.borrow().sharp_scale(view)
         }
 
         pub fn remove_display_object(&self, mc: &Mutation<'gc>, callback: DisplayObjectWeak<'gc>) {
@@ -671,6 +761,36 @@ mod wrapper {
             // (rendering is done on the GPU, so the CPU pixels don't need to be up-to-date).
             inner_bitmap_data.update_dirty_texture(context.renderer);
             let handle = inner_bitmap_data.bitmap_handle(context.renderer);
+
+            // AQW build: enlarged on the stage, a bitmap with a sharp copy is drawn from the
+            // copy, shrunk to the bitmap's size (see `Sharp`). At its own size or smaller,
+            // and into another bitmap, its own pixels are what is drawn, as always.
+            if !context.is_offscreen
+                && let Sharp::Copy {
+                    handle: sharp,
+                    width,
+                    height,
+                } = &inner_bitmap_data.sharp
+            {
+                let mut transform = context.transform_stack.transform();
+                let matrix = transform.matrix;
+                let enlarged = matrix.a.hypot(matrix.b).max(matrix.c.hypot(matrix.d)) > 1.05;
+                if enlarged {
+                    transform.matrix = matrix
+                        * ruffle_render::matrix::Matrix::scale(
+                            inner_bitmap_data.width as f32 / *width as f32,
+                            inner_bitmap_data.height as f32 / *height as f32,
+                        );
+                    context.commands.render_bitmap(
+                        sharp.clone(),
+                        transform,
+                        true,
+                        PixelSnapping::Never,
+                        PixelRegion::for_whole_size(*width, *height),
+                    );
+                    return;
+                }
+            }
 
             context.commands.render_bitmap(
                 handle,
@@ -731,11 +851,9 @@ impl std::fmt::Debug for BitmapRawData<'_> {
 
 impl<'gc> BitmapRawData<'gc> {
     pub fn new(width: u32, height: u32, transparency: bool, fill_color: u32) -> Self {
+        let fill = Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
         Self {
-            pixels: vec![
-                Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
-                width as usize * height as usize
-            ],
+            pixels: vec![fill; width as usize * height as usize],
             width,
             height,
             transparency,
@@ -744,6 +862,7 @@ impl<'gc> BitmapRawData<'gc> {
             avm2_object: None,
             display_objects: vec![],
             dirty_state: DirtyState::Clean,
+            sharp: Sharp::for_new(width, height, fill),
             #[cfg(feature = "egui")]
             egui_texture: Default::default(),
         }
@@ -764,6 +883,7 @@ impl<'gc> BitmapRawData<'gc> {
             avm2_object: None,
             disposed: false,
             dirty_state: DirtyState::Clean,
+            sharp: Sharp::None,
             display_objects: vec![],
             #[cfg(feature = "egui")]
             egui_texture: Default::default(),
@@ -781,6 +901,7 @@ impl<'gc> BitmapRawData<'gc> {
         self.bitmap_handle = None;
         // There's no longer a handle to update
         self.dirty_state = DirtyState::Clean;
+        self.sharp = Sharp::None;
         self.disposed = true;
     }
 
@@ -825,8 +946,101 @@ impl<'gc> BitmapRawData<'gc> {
         sync_handle: Box<dyn SyncHandle>,
         region: PixelRegion,
     ) {
+        // AQW build: (`operations::draw` takes the sharp copy out before this and gives it
+        // the same draw; anything else that writes on the GPU ends it.)
+        self.drop_sharp(gc_context);
         self.dirty_state = DirtyState::GpuModified(sync_handle, region);
         self.inform_display_objects(gc_context);
+    }
+
+    /// AQW build: the bitmap is written to by something its sharp copy cannot follow.
+    fn drop_sharp(&mut self, gc_context: &Mutation<'gc>) {
+        if matches!(self.sharp, Sharp::Copy { .. }) {
+            // The bitmaps showing it draw from the bitmap itself again.
+            self.mark_replay_dirty(gc_context);
+        }
+        self.sharp = Sharp::None;
+    }
+
+    /// AQW build: what the bitmaps showing this one draw has changed (see
+    /// `display_object::replay`; a change of the pixels alone needs no telling).
+    fn mark_replay_dirty(&self, gc_context: &Mutation<'gc>) {
+        for object in &self.display_objects {
+            if let Some(object) = object.upgrade(gc_context) {
+                crate::display_object::replay::mark_dirty(&object.base());
+            }
+        }
+    }
+
+    /// AQW build: how many times as wide and as high as the bitmap its sharp copy is, or is
+    /// to be in a window that draws the stage with `view`; `None` when it has and gets none.
+    pub fn sharp_scale(&self, view: &ruffle_render::matrix::Matrix) -> Option<(f32, f32)> {
+        let (width, height) = match self.sharp {
+            Sharp::None => return None,
+            Sharp::Copy { width, height, .. } => (width, height),
+            Sharp::Blank(_) => {
+                let scale = (view.a.hypot(view.b)).max(view.c.hypot(view.d)).min(Sharp::MOST);
+                if !(scale >= Sharp::LEAST) {
+                    return None;
+                }
+                (
+                    (self.width as f32 * scale).ceil() as u32,
+                    (self.height as f32 * scale).ceil() as u32,
+                )
+            }
+        };
+        Some((width as f32 / self.width as f32, height as f32 / self.height as f32))
+    }
+
+    /// AQW build: the sharp copy as it is, leaving none (for `operations::draw`, which puts
+    /// it back with `draw_sharp`).
+    pub fn take_sharp(&mut self) -> Sharp {
+        std::mem::take(&mut self.sharp)
+    }
+
+    /// AQW build: gives the sharp copy `was` (made first, if the bitmap was blank) the draw
+    /// the bitmap just got: `commands` are that draw `scale` times larger.
+    pub fn draw_sharp(
+        &mut self,
+        gc_context: &Mutation<'gc>,
+        renderer: &mut dyn RenderBackend,
+        was: Sharp,
+        scale: (f32, f32),
+        commands: ruffle_render::commands::CommandList,
+        quality: ruffle_render::quality::StageQuality,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (handle, width, height, new) = match was {
+            Sharp::None => return,
+            Sharp::Copy { handle, width, height } => (handle, width, height, false),
+            Sharp::Blank(fill) => {
+                let width = (self.width as f32 * scale.0).round() as u32;
+                let height = (self.height as f32 * scale.1).round() as u32;
+                let pixels = vec![fill; width as usize * height as usize];
+                let bitmap =
+                    Bitmap::new(width, height, BitmapFormat::Rgba, Color::slice_as_rgba(&pixels));
+                let Ok(handle) = renderer.register_bitmap(bitmap) else {
+                    return;
+                };
+                (handle, width, height, true)
+            }
+        };
+        // Nothing reads the copy back: what would fetch its pixels is let go at once.
+        let drawn = renderer.render_offscreen(
+            handle.clone(),
+            commands,
+            quality,
+            PixelRegion::for_whole_size(width, height),
+        );
+        if drawn.is_none() {
+            return;
+        }
+        self.sharp = Sharp::Copy { handle, width, height };
+        SHARP_DRAWS.fetch_add(1, Relaxed);
+        if new {
+            SHARP_COPIES.fetch_add(1, Relaxed);
+            self.mark_replay_dirty(gc_context);
+        }
     }
 
     pub fn set_cpu_dirty(&mut self, gc_context: &Mutation<'gc>, region: PixelRegion) {
@@ -835,6 +1049,9 @@ impl<'gc> BitmapRawData<'gc> {
 
         #[cfg(feature = "egui")]
         self.egui_texture.borrow_mut().take();
+
+        // AQW build: (see `Sharp`.)
+        self.drop_sharp(gc_context);
 
         let inform_changes = match &mut self.dirty_state {
             DirtyState::CpuModified(old_region) => {

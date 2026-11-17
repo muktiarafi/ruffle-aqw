@@ -70,6 +70,11 @@ pub enum SoundChannelData {
     },
     Loaded {
         sound_instance: SoundInstanceHandle,
+        /// AQW build: the transform last given to the sound, kept for when it has ended or
+        /// was stopped. Flash still reports it then; without it the getter returned the
+        /// default (full volume), and AQW restarts map music with the old channel's transform
+        /// after `SoundMixer.stopAll()` (music toggle, cutscenes), so music came back loud.
+        sound_transform: SoundTransform,
     },
 }
 
@@ -97,7 +102,7 @@ impl<'gc> SoundChannelObject<'gc> {
         // The position is cached on read. This means that if the position isn't read until after
         // the sound has played, the position will be 0 (#9952).
         let sound_channel_data = self.0.sound_channel_data.borrow();
-        if let SoundChannelData::Loaded { sound_instance } = &*sound_channel_data
+        if let SoundChannelData::Loaded { sound_instance, .. } = &*sound_channel_data
             && let Some(pos) = context.audio.get_sound_position(*sound_instance)
         {
             self.0.position.set(pos);
@@ -110,7 +115,7 @@ impl<'gc> SoundChannelObject<'gc> {
         let sound_channel_data = self.0.sound_channel_data.borrow();
         match &*sound_channel_data {
             SoundChannelData::NotLoaded { .. } => None,
-            SoundChannelData::Loaded { sound_instance } => Some(*sound_instance),
+            SoundChannelData::Loaded { sound_instance, .. } => Some(*sound_instance),
         }
     }
 
@@ -129,14 +134,20 @@ impl<'gc> SoundChannelObject<'gc> {
                     context.set_local_sound_transform(instance, *sound_transform);
                 }
 
+                let sound_transform = context
+                    .local_sound_transform(instance)
+                    .cloned()
+                    .unwrap_or_default();
+
                 if *should_stop {
                     context.stop_sound(instance);
                 }
                 *sound_channel_data = SoundChannelData::Loaded {
                     sound_instance: instance,
+                    sound_transform,
                 }
             }
-            SoundChannelData::Loaded { sound_instance } => {
+            SoundChannelData::Loaded { sound_instance, .. } => {
                 panic!(
                     "Tried to replace loaded sound instance {sound_instance:?} with {instance:?}"
                 )
@@ -150,10 +161,16 @@ impl<'gc> SoundChannelObject<'gc> {
             SoundChannelData::NotLoaded {
                 sound_transform, ..
             } => sound_transform,
-            SoundChannelData::Loaded { sound_instance } => activation
-                .context
-                .local_sound_transform(sound_instance)
-                .cloned(),
+            SoundChannelData::Loaded {
+                sound_instance,
+                sound_transform,
+            } => Some(
+                activation
+                    .context
+                    .local_sound_transform(sound_instance)
+                    .cloned()
+                    .unwrap_or(sound_transform),
+            ),
         }
     }
 
@@ -169,7 +186,11 @@ impl<'gc> SoundChannelObject<'gc> {
             } => {
                 *sound_transform = Some(new_sound_transform);
             }
-            SoundChannelData::Loaded { sound_instance } => {
+            SoundChannelData::Loaded {
+                sound_instance,
+                sound_transform,
+            } => {
+                *sound_transform = new_sound_transform;
                 activation
                     .context
                     .set_local_sound_transform(*sound_instance, new_sound_transform);
@@ -186,7 +207,7 @@ impl<'gc> SoundChannelObject<'gc> {
             } => {
                 *should_stop = true;
             }
-            SoundChannelData::Loaded { sound_instance } => {
+            SoundChannelData::Loaded { sound_instance, .. } => {
                 activation.context.stop_sound(*sound_instance);
             }
         }

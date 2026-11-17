@@ -109,8 +109,9 @@ impl GlowFilter {
         }
     }
 
-    fn pipeline(&self, descriptors: &Descriptors, msaa_sample_count: u32) -> &wgpu::RenderPipeline {
+    pub(crate) fn pipeline(&self, descriptors: &Descriptors, msaa_sample_count: u32) -> &wgpu::RenderPipeline {
         self.pipeline.get_or_init(msaa_sample_count, || {
+            let _timer = crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
             let label = create_debug_label!("Glow Filter ({} msaa)", msaa_sample_count);
             descriptors
                 .device
@@ -240,6 +241,7 @@ impl GlowFilter {
                     },
                 ],
             });
+        crate::perf_counters::inc(crate::perf_counters::RENDER_PASS);
         let mut render_pass = draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: create_debug_label!("Glow filter").as_deref(),
             color_attachments: &[target.color_attachments()],
@@ -251,10 +253,10 @@ impl GlowFilter {
 
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(
-            descriptors.quad.index_buffer.slice(..),
+            descriptors.quad.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        render_pass.draw_indexed(descriptors.quad.indices_quad.clone(), 0, 0..1);
+        render_pass.draw_indexed(0..6, 0, 0..1);
         target
     }
 }

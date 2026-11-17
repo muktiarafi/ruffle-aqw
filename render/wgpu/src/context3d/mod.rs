@@ -111,13 +111,15 @@ impl WgpuContext3D {
             });
 
             BitmapHandle(Arc::new(Texture {
+                live: None,
                 repeating_linear: Default::default(),
                 repeating_nearest: Default::default(),
                 clamped_linear: Default::default(),
                 clamped_nearest: Default::default(),
-                view: dummy_texture.create_view(&Default::default()),
                 texture: dummy_texture,
                 copy_count: Cell::new(0),
+                id: Texture::new_id(),
+                version: Default::default(),
             }))
         };
 
@@ -657,44 +659,52 @@ impl Context3D for WgpuContext3D {
                     // which is what the Stage rendering code expects. In multisample mode,
                     // this is our resolve texture.
                     self.back_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
-                        view: self.back_buffer_resolve_texture_view.clone().unwrap(),
+                        live: None,
                         texture: back_buffer_resolve_texture.unwrap(),
                         repeating_linear: Default::default(),
                         repeating_nearest: Default::default(),
                         clamped_linear: Default::default(),
                         clamped_nearest: Default::default(),
                         copy_count: Cell::new(0),
+                        id: Texture::new_id(),
+                        version: Default::default(),
                     }));
                     self.front_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
-                        view: self.front_buffer_resolve_texture_view.clone().unwrap(),
+                        live: None,
                         texture: front_buffer_resolve_texture.unwrap(),
                         repeating_linear: Default::default(),
                         repeating_nearest: Default::default(),
                         clamped_linear: Default::default(),
                         clamped_nearest: Default::default(),
                         copy_count: Cell::new(0),
+                        id: Texture::new_id(),
+                        version: Default::default(),
                     }));
                 } else {
                     // In non-multisample mode, we don't have a separate resolve buffer,
                     // so our main texture gets used as the raw texture handle.
 
                     self.back_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
-                        view: self.back_buffer_texture_view.clone().unwrap(),
+                        live: None,
                         texture: back_buffer_texture,
                         repeating_linear: Default::default(),
                         repeating_nearest: Default::default(),
                         clamped_linear: Default::default(),
                         clamped_nearest: Default::default(),
                         copy_count: Cell::new(0),
+                        id: Texture::new_id(),
+                        version: Default::default(),
                     }));
                     self.front_buffer_raw_texture_handle = BitmapHandle(Arc::new(Texture {
-                        view: self.front_buffer_texture_view.clone().unwrap(),
+                        live: None,
                         texture: front_buffer_texture,
                         repeating_linear: Default::default(),
                         repeating_nearest: Default::default(),
                         clamped_linear: Default::default(),
                         clamped_nearest: Default::default(),
                         copy_count: Cell::new(0),
+                        id: Texture::new_id(),
+                        version: Default::default(),
                     }));
                     self.current_texture_resolve_view = None;
                 }

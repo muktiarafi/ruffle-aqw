@@ -11,7 +11,7 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-wgpu = { workspace = true, features = ["naga-ir"] }
+wgpu = { workspace = true, features = ["naga-ir", "counters"] }
 tracing = { workspace = true }
 ruffle_render = { path = "..", features = ["tessellator", "wgpu"] }
 bytemuck = { workspace = true, features = ["derive"] }
@@ -28,8 +28,13 @@ naga = { workspace = true }
 indexmap = { workspace = true }
 smallvec = { workspace = true }
 wgpu-profiler = { workspace = true }
+rayon = { workspace = true }
 
 # desktop
+[target.'cfg(not(target_family = "wasm"))'.dependencies.wgpu-core]
+# AQW build: `aqw_flush_encoder_drops` (see `release_gpu_memory`).
+version = "30.0.1"
+
 [target.'cfg(not(target_family = "wasm"))'.dependencies.futures]
 workspace = true
 

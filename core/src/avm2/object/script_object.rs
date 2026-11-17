@@ -79,6 +79,76 @@ pub struct ScriptObjectData<'gc> {
     vtable: Lock<VTable<'gc>>,
 }
 
+impl<'gc> ScriptObjectData<'gc> {
+    /// AQW build: like `Collect::trace`, but skips entries keyed by objects (key and value).
+    /// Used by weak-keyed `Dictionary`s, whose object-keyed entries are instead kept alive by
+    /// `DictionaryObject::finalize_weak_keys` only while their key is reachable (ephemerons).
+    pub(crate) fn trace_without_object_keys<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        for (key, prop) in self.values.borrow().iter() {
+            if !matches!(key, DynamicKey::Object(_)) {
+                cc.trace(key);
+                cc.trace(&prop.value);
+            }
+        }
+        cc.trace(&self.slots);
+        cc.trace(&self.bound_methods);
+        cc.trace(&self.proto);
+        cc.trace(&self.instance_class);
+        cc.trace(&self.vtable);
+    }
+
+    /// AQW build heap inspector: this object's class, plus which of its properties holds the
+    /// value at `child` (an erased `Gc` value pointer), if given.
+    pub(crate) fn debug_describe(&self, child: Option<*const ()>) -> String {
+        let class = self.instance_class.name().local_name().to_string();
+        let Some(child) = child else {
+            return class;
+        };
+        let is_child = |value: &Value<'gc>| matches!(value, Value::Object(o) if std::ptr::addr_eq(o.as_ptr(), child));
+        for (key, prop) in self.values.borrow().iter() {
+            let key_text = match key {
+                DynamicKey::String(s) => s.to_string(),
+                DynamicKey::Uint(n) => n.to_string(),
+                DynamicKey::Object(o) => {
+                    if std::ptr::addr_eq(o.as_ptr(), child) {
+                        return format!("{class} (dictionary key)");
+                    }
+                    "<object key>".to_string()
+                }
+            };
+            if is_child(&prop.value) {
+                return format!("{class}[{key_text:?}]");
+            }
+        }
+        for (slot_id, slot) in self.slots.iter().enumerate() {
+            if is_child(&slot.get()) {
+                let vtable = self.vtable.get();
+                let name = vtable
+                    .traits_unordered()
+                    .find(|(_, _, prop)| {
+                        matches!(prop,
+                            crate::avm2::property::Property::Slot { slot_id: id }
+                            | crate::avm2::property::Property::ConstSlot { slot_id: id }
+                                if *id == slot_id)
+                    })
+                    .map(|(name, _, _)| name.to_string())
+                    .unwrap_or_else(|| format!("slot {slot_id}"));
+                return format!("{class}.{name}");
+            }
+        }
+        if self
+            .bound_methods
+            .borrow()
+            .iter()
+            .flatten()
+            .any(|f| std::ptr::addr_eq(Gc::as_ptr(f.0), child))
+        {
+            return format!("{class} (bound method)");
+        }
+        format!("{class} (internal field)")
+    }
+}
+
 impl<'gc> TObject<'gc> for ScriptObject<'gc> {
     fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
         self.0
