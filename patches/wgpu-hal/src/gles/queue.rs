@@ -202,12 +202,15 @@ impl super::Queue {
     ) {
         // AQW build: count the commands `rs` doesn't see call by call, and let it forget what
         // it knows of state they may change (see `super::aqw`).
-        rs.unmodeled(
-            command,
-            self.shared
-                .workarounds
-                .contains(super::Workarounds::MESA_I915_SRGB_SHADER_CLEAR),
-        );
+        unsafe {
+            rs.unmodeled(
+                gl,
+                command,
+                self.shared
+                    .workarounds
+                    .contains(super::Workarounds::MESA_I915_SRGB_SHADER_CLEAR),
+            )
+        };
         match *command {
             C::Draw {
                 topology,
@@ -1942,6 +1945,7 @@ impl crate::Queue for super::Queue {
                 };
             }
 
+            unsafe { rs.end_command_buffer(gl) };
             if cmd_buf.label.is_some()
                 && self
                     .shared
