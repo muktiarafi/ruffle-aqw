@@ -118,6 +118,10 @@ enum Slot {
     Ended,
     /// Copied out in the frame being recorded; read back once that frame is submitted.
     Copying,
+    /// Turu: that frame went to be submitted; read back at the next frame's submit, by which its
+    /// submit has surely happened (`ensure_presented`): a present thread submits later, and
+    /// mapping a buffer a submission still uses fails it (`BufferStillMapped`).
+    Submitting,
     /// Submitted; `done` once mapped, `ok` if mapping worked.
     Reading {
         done: Arc<AtomicBool>,
@@ -296,7 +300,7 @@ impl GpuTimer {
     /// After the frame was submitted: asks for the timestamps it copied out (the last frame's).
     pub fn submitted(&mut self) {
         for slot in 0..SLOTS {
-            if !matches!(self.slots[slot], Slot::Copying) {
+            if !matches!(self.slots[slot], Slot::Submitting) {
                 continue;
             }
             let (done, ok) = (
@@ -311,6 +315,11 @@ impl GpuTimer {
                     done2.store(true, Ordering::Release);
                 });
             self.slots[slot] = Slot::Reading { done, ok };
+        }
+        for slot in &mut self.slots {
+            if matches!(slot, Slot::Copying) {
+                *slot = Slot::Submitting;
+            }
         }
     }
 
