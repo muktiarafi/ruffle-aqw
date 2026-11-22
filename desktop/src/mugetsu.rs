@@ -118,7 +118,12 @@ pub fn dx12_starting() -> bool {
 /// When the driver file was last changed (installed), as seconds since 1970.
 fn modified_secs(file: &Path) -> Option<u64> {
     let modified = std::fs::metadata(file).ok()?.modified().ok()?;
-    Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
+    Some(
+        modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs(),
+    )
 }
 
 /// Remembers that the Vulkan driver crashed in `module` (full path of the crashed file).
@@ -316,16 +321,31 @@ pub enum Setting {
 /// Something Mugetsu tells the player in the game window (see `gui::prompt`). These were
 /// message boxes from background threads, which could open behind the game.
 pub enum Notice {
-    UpdateAvailable { latest: String, current: String },
+    UpdateAvailable {
+        latest: String,
+        current: String,
+    },
     /// Running on `chosen` (built-in graphics) although the PC has `dedicated`.
-    BuiltInGraphics { chosen: String, dedicated: String },
+    BuiltInGraphics {
+        chosen: String,
+        dedicated: String,
+    },
     /// Slow on the built-in graphics `chip` at AQW's Quality `quality` (High or Medium).
-    QualityLow { chip: String, quality: &'static str },
+    QualityLow {
+        chip: String,
+        quality: &'static str,
+    },
     /// Still slow on the built-in graphics `chip` at Quality Low: Performance mode at
     /// `level` is offered (see `performance_offer_tick`).
-    PerformanceMode { chip: String, level: Performance },
+    PerformanceMode {
+        chip: String,
+        level: Performance,
+    },
     /// Vulkan isn't available, so `name` is used; `slower` unless that's DirectX 12.
-    VulkanUnavailable { name: &'static str, slower: bool },
+    VulkanUnavailable {
+        name: &'static str,
+        slower: bool,
+    },
 }
 
 /// Opens Windows' per-program graphics settings (the built-in graphics notice's button).
@@ -492,9 +512,11 @@ static MEMORY_LIMIT_MB: AtomicU32 = AtomicU32::new(0);
 
 /// Reads the saved limit. (`RUFFLE_TEST_MEMORY_LIMIT_MB=<n>`, testing: instead of it.)
 pub fn load_memory_limit() {
-    let saved = std::env::var("RUFFLE_TEST_MEMORY_LIMIT_MB").ok().or_else(|| {
-        config_dir().and_then(|dir| std::fs::read_to_string(dir.join(MEMORY_LIMIT_FILE)).ok())
-    });
+    let saved = std::env::var("RUFFLE_TEST_MEMORY_LIMIT_MB")
+        .ok()
+        .or_else(|| {
+            config_dir().and_then(|dir| std::fs::read_to_string(dir.join(MEMORY_LIMIT_FILE)).ok())
+        });
     let mb = saved
         .and_then(|text| text.trim().parse::<u32>().ok())
         .unwrap_or(0);
@@ -665,7 +687,9 @@ pub fn load_performance() {
     let saved = std::env::var("RUFFLE_TEST_PERFORMANCE").ok().or_else(|| {
         config_dir().and_then(|dir| std::fs::read_to_string(dir.join(PERFORMANCE_FILE)).ok())
     });
-    let level = saved.as_deref().map_or(Performance::Off, Performance::from_saved);
+    let level = saved
+        .as_deref()
+        .map_or(Performance::Off, Performance::from_saved);
     PERFORMANCE.store(level as u8, Ordering::Relaxed);
 }
 
@@ -738,8 +762,10 @@ pub fn set_show_fps(on: bool) {
     let path = dir.join(SHOW_FPS_FILE);
     if on {
         let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(path, "on
-");
+        let _ = std::fs::write(
+            path, "on
+",
+        );
     } else {
         let _ = std::fs::remove_file(path);
     }
@@ -798,7 +824,10 @@ impl FpsLimit {
 pub fn load_pacing() {
     let dir = config_dir();
     let test = std::env::var_os("RUFFLE_TEST_UNCAPPED").is_some();
-    let on = test || dir.as_ref().is_some_and(|dir| dir.join(UNCAPPED_FILE).exists());
+    let on = test
+        || dir
+            .as_ref()
+            .is_some_and(|dir| dir.join(UNCAPPED_FILE).exists());
     UNCAPPED.store(on, Ordering::Relaxed);
     let limit = std::env::var("RUFFLE_TEST_FPS_LIMIT")
         .ok()
@@ -963,7 +992,8 @@ fn preferred_adapter(low_power: bool) -> Option<(u32, String)> {
     unsafe {
         let factory: IDXGIFactory6 = CreateDXGIFactory1().ok()?;
         for index in 0.. {
-            let adapter: IDXGIAdapter1 = factory.EnumAdapterByGpuPreference(index, preference).ok()?;
+            let adapter: IDXGIAdapter1 =
+                factory.EnumAdapterByGpuPreference(index, preference).ok()?;
             let desc = adapter.GetDesc1().ok()?;
             if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
                 continue;
@@ -1020,7 +1050,11 @@ const DEFAULT_ON: [(&str, &str, &str); 8] = [
     // Not a speed-up: small snapshots the game takes of its own art (the darkened skill and
     // aura icons while they cool down) get a copy at the window's scale and are shown from
     // it (see core's `bitmap_data::Sharp`). About 4 small draws a second in a fight.
-    ("sharp-snapshots", "RUFFLE_SHARP_SNAPSHOTS", "no-sharp-snapshots"),
+    (
+        "sharp-snapshots",
+        "RUFFLE_SHARP_SNAPSHOTS",
+        "no-sharp-snapshots",
+    ),
     // Not a speed-up either: clips the game puts on the stage between two frames run their
     // first frame scripts before the next picture, not in the next frame (see core's
     // `frame_lifecycle::early_scripts`). Without it colour-custom armour, hair, capes and
@@ -1349,9 +1383,7 @@ pub fn low_quality_tick(
         StageQuality::Medium => "Medium",
         _ => "High",
     };
-    tracing::info!(
-        "Suggesting Quality Low: {drawn_fps:.1} FPS drawn on {chip} at {quality_name}"
-    );
+    tracing::info!("Suggesting Quality Low: {drawn_fps:.1} FPS drawn on {chip} at {quality_name}");
     let _ = events.send_event(crate::custom_event::RuffleEvent::MugetsuNotice(
         Notice::QualityLow {
             chip,
@@ -1477,10 +1509,11 @@ pub fn check_gpu_choice(
                 backends,
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
-            let Some(dedicated) = futures::executor::block_on(instance.enumerate_adapters(backends))
-                .into_iter()
-                .map(|adapter| adapter.get_info())
-                .find(|info| info.device_type == wgpu::DeviceType::DiscreteGpu)
+            let Some(dedicated) =
+                futures::executor::block_on(instance.enumerate_adapters(backends))
+                    .into_iter()
+                    .map(|adapter| adapter.get_info())
+                    .find(|info| info.device_type == wgpu::DeviceType::DiscreteGpu)
             else {
                 return;
             };
@@ -1707,7 +1740,10 @@ mod tests {
         assert!(!variables(&[]).contains(&THREAD));
         // (Only on Windows so far.)
         assert_eq!(interpolating(&[]).contains(&THREAD), cfg!(windows));
-        assert_eq!(interpolating(&[]).len(), NEW.len() + usize::from(cfg!(windows)));
+        assert_eq!(
+            interpolating(&[]).len(),
+            NEW.len() + usize::from(cfg!(windows))
+        );
         // Its files: on without interpolation, off with it.
         assert!(variables(&["render-thread"]).contains(&THREAD));
         assert!(!interpolating(&["no-render-thread"]).contains(&THREAD));

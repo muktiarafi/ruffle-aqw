@@ -192,7 +192,9 @@ impl Descriptors {
         pipelines
             .entry((msaa_sample_count, format))
             .or_insert_with(|| {
-                let _timer = crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
+                let _timer = crate::perf_counters::timers::Scoped::new(
+                    crate::perf_counters::timers::PIPELINE,
+                );
                 let copy_texture_pipeline_layout =
                     &self
                         .device
@@ -258,7 +260,8 @@ impl Descriptors {
             .or_default()
             .clone();
         cell.get_or_init(|| {
-            let _timer = crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
+            let _timer =
+                crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
             Arc::new(Pipelines::new(
                 &self.device,
                 &self.shaders,

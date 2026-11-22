@@ -6,9 +6,11 @@ use crate::buffer_builder::BufferBuilder;
 use crate::buffer_pool::TexturePool;
 use crate::dynamic_transforms::DynamicTransforms;
 use crate::mesh::{DrawType, Mesh, as_mesh};
-use crate::surface::{ChunkSink, Surface};
 use crate::surface::target::CommandTarget;
-use crate::{Descriptors, MaskState, Pipelines, PosColorVertex, PosUvVertex, Transforms, as_texture};
+use crate::surface::{ChunkSink, Surface};
+use crate::{
+    Descriptors, MaskState, Pipelines, PosColorVertex, PosUvVertex, Transforms, as_texture,
+};
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::bitmap::{BitmapHandle, PixelRegion, PixelSnapping};
 use ruffle_render::commands::{Command, CommandHandler, CommandList, RenderBlendMode};
@@ -243,7 +245,10 @@ impl<'encoder> CommandRenderer<'encoder> {
 
     pub fn prep_color(&self, render_pass: &mut wgpu::RenderPass<'encoder>) {
         if self.needs_stencil {
-            self.set_pipeline(render_pass, self.pipelines.color.pipeline_for(self.mask_state));
+            self.set_pipeline(
+                render_pass,
+                self.pipelines.color.pipeline_for(self.mask_state),
+            );
         } else {
             self.set_pipeline(render_pass, self.pipelines.color.stencilless_pipeline());
         }
@@ -251,7 +256,10 @@ impl<'encoder> CommandRenderer<'encoder> {
 
     pub fn prep_lines(&self, render_pass: &mut wgpu::RenderPass<'encoder>) {
         if self.needs_stencil {
-            self.set_pipeline(render_pass, self.pipelines.lines.pipeline_for(self.mask_state));
+            self.set_pipeline(
+                render_pass,
+                self.pipelines.lines.pipeline_for(self.mask_state),
+            );
         } else {
             self.set_pipeline(render_pass, self.pipelines.lines.stencilless_pipeline());
         }
@@ -263,7 +271,10 @@ impl<'encoder> CommandRenderer<'encoder> {
         bind_group: &'encoder wgpu::BindGroup,
     ) {
         if self.needs_stencil {
-            self.set_pipeline(render_pass, self.pipelines.gradients.pipeline_for(self.mask_state));
+            self.set_pipeline(
+                render_pass,
+                self.pipelines.gradients.pipeline_for(self.mask_state),
+            );
         } else {
             self.set_pipeline(render_pass, self.pipelines.gradients.stencilless_pipeline());
         }
@@ -283,13 +294,19 @@ impl<'encoder> CommandRenderer<'encoder> {
                 self.set_pipeline(render_pass, &self.pipelines.bitmap_opaque_dummy_stencil);
             }
             (true, false) => {
-                self.set_pipeline(render_pass, self.pipelines.bitmap[blend_mode].pipeline_for(self.mask_state));
+                self.set_pipeline(
+                    render_pass,
+                    self.pipelines.bitmap[blend_mode].pipeline_for(self.mask_state),
+                );
             }
             (false, true) => {
                 self.set_pipeline(render_pass, &self.pipelines.bitmap_opaque);
             }
             (false, false) => {
-                self.set_pipeline(render_pass, self.pipelines.bitmap[blend_mode].stencilless_pipeline());
+                self.set_pipeline(
+                    render_pass,
+                    self.pipelines.bitmap[blend_mode].stencilless_pipeline(),
+                );
             }
         }
 
@@ -302,9 +319,15 @@ impl<'encoder> CommandRenderer<'encoder> {
         bind_group: &'encoder wgpu::BindGroup,
     ) {
         if self.needs_stencil {
-            self.set_pipeline(render_pass, self.pipelines.alpha_mask.pipeline_for(self.mask_state));
+            self.set_pipeline(
+                render_pass,
+                self.pipelines.alpha_mask.pipeline_for(self.mask_state),
+            );
         } else {
-            self.set_pipeline(render_pass, self.pipelines.alpha_mask.stencilless_pipeline());
+            self.set_pipeline(
+                render_pass,
+                self.pipelines.alpha_mask.stencilless_pipeline(),
+            );
         }
 
         self.set_group2(render_pass, bind_group);
@@ -356,10 +379,18 @@ impl<'encoder> CommandRenderer<'encoder> {
         // between, the next instance), which could be one instanced draw.
         let repeats = !self.bound.changed.replace(false)
             && self.bound.last_draw.get()
-                == Some((first_index, base_vertex, num_indices, instance_index.wrapping_sub(1)));
-        self.bound
-            .last_draw
-            .set(Some((first_index, base_vertex, num_indices, instance_index)));
+                == Some((
+                    first_index,
+                    base_vertex,
+                    num_indices,
+                    instance_index.wrapping_sub(1),
+                ));
+        self.bound.last_draw.set(Some((
+            first_index,
+            base_vertex,
+            num_indices,
+            instance_index,
+        )));
         crate::perf_counters::inc(crate::perf_counters::DRAWS);
         if repeats {
             crate::perf_counters::inc(crate::perf_counters::DRAWS_REPEAT);
@@ -493,7 +524,10 @@ impl<'encoder> CommandRenderer<'encoder> {
                 self.draw_at(
                     render_pass,
                     vertices.buffer().slice(draw.vertices.clone()),
-                    (indices.buffer().slice(draw.indices.clone()), draw.index_format),
+                    (
+                        indices.buffer().slice(draw.indices.clone()),
+                        draw.index_format,
+                    ),
                     0,
                     0,
                     num_indices,
@@ -941,7 +975,14 @@ fn layer_rect_and_exact_size(
     };
     if bounds.x0 > bounds.x1 || bounds.y0 > bounds.y1 {
         // Draws nothing.
-        return Some((smallest, LayerRect { width: 0, height: 0, ..smallest }));
+        return Some((
+            smallest,
+            LayerRect {
+                width: 0,
+                height: 0,
+                ..smallest
+            },
+        ));
     }
     // Far-off coordinates (or NaN) stay full-size, so shifting the commands can't overflow.
     if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
@@ -956,7 +997,14 @@ fn layer_rect_and_exact_size(
     let y1 = (bounds.y1 + LAYER_PADDING).ceil().min(target_height as f64);
     if x1 <= x0 || y1 <= y0 {
         // Entirely outside the target.
-        return Some((smallest, LayerRect { width: 0, height: 0, ..smallest }));
+        return Some((
+            smallest,
+            LayerRect {
+                width: 0,
+                height: 0,
+                ..smallest
+            },
+        ));
     }
     let exact = LayerRect {
         x: x0 as u32,
@@ -1399,7 +1447,9 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
             let mut cache = self.texture_pool.layer_cache();
             for (index, candidate) in candidates.iter().enumerate() {
                 let Some(candidate) = candidate else { continue };
-                let Some(Command::Blend(list, _)) = &commands[index] else { continue };
+                let Some(Command::Blend(list, _)) = &commands[index] else {
+                    continue;
+                };
                 if candidate.rect.width == 0 || candidate.rect.height == 0 {
                     continue;
                 }
@@ -1415,8 +1465,7 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
                     continue;
                 };
                 keys[index] = Some(key);
-                if let Some(cached) =
-                    cache.lookup(key, candidate.rect.width, candidate.rect.height)
+                if let Some(cached) = cache.lookup(key, candidate.rect.width, candidate.rect.height)
                 {
                     crate::perf_counters::inc(crate::perf_counters::ATLAS_HIT);
                     let placement = AtlasPlacement {
@@ -1465,12 +1514,15 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
         };
         let (width, height) = (candidate.rect.width, candidate.rect.height);
         let padded_row = (width * 4).div_ceil(256) * 256;
-        let buffer = self.descriptors.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("layer cache check"),
-            size: padded_row as u64 * height as u64 * 2,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let buffer = self
+            .descriptors
+            .device
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("layer cache check"),
+                size: padded_row as u64 * height as u64 * 2,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
         for (half, placement) in [(0u64, &cached), (1u64, &fresh)] {
             self.draw_encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
@@ -1525,7 +1577,8 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
         let is_layer = matches!(blend_mode, RenderBlendMode::Builtin(BlendMode::Layer));
         // The same choices as `blend`.
         let (blend_type, counter) = match BlendType::from(blend_mode.clone()) {
-            BlendType::Complex(ComplexBlend::Alpha | ComplexBlend::Erase) | BlendType::Shader(_) => {
+            BlendType::Complex(ComplexBlend::Alpha | ComplexBlend::Erase)
+            | BlendType::Shader(_) => {
                 return None;
             }
             BlendType::Complex(ComplexBlend::Multiply)
@@ -1539,7 +1592,9 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
             blend_type => {
                 let counter = match &blend_type {
                     _ if is_layer => pc::BLEND_LAYER,
-                    BlendType::Complex(mode) => pc::COMPLEX_BASE + enum_map::Enum::into_usize(*mode),
+                    BlendType::Complex(mode) => {
+                        pc::COMPLEX_BASE + enum_map::Enum::into_usize(*mode)
+                    }
                     _ => pc::BLEND_TRIVIAL,
                 };
                 (blend_type, counter)
@@ -1613,7 +1668,9 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
             crate::packing::pack(&sizes, ATLAS_MAX_LAYERS_PER_PAGE);
         crate::perf_counters::count_page(
             (width, height),
-            upcoming[..count].iter().map(|(_, rect)| (rect.width, rect.height)),
+            upcoming[..count]
+                .iter()
+                .map(|(_, rect)| (rect.width, rect.height)),
         );
         let layers: Vec<(usize, LayerRect, u32, u32)> = upcoming[..count]
             .iter()
@@ -2068,8 +2125,7 @@ impl CommandHandler for WgpuCommandHandler<'_, '_> {
                     )
                 });
                 let transform = Transform {
-                    matrix: offset
-                        * Matrix::scale(target.width() as f32, target.height() as f32),
+                    matrix: offset * Matrix::scale(target.width() as f32, target.height() as f32),
                     tz: 0.0,
                     color_transform: Default::default(),
                     perspective_projection: None,

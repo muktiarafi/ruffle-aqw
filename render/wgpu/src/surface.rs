@@ -3,12 +3,12 @@ pub mod target;
 
 use crate::backend::RenderTargetMode;
 use crate::blend::ComplexBlend;
+use crate::buffer_builder::BufferBuilder;
 use crate::buffer_pool::TexturePool;
 use crate::dynamic_transforms::DynamicTransforms;
 use crate::filters::FilterSource;
 use crate::mesh::Mesh;
 use crate::pixel_bender::{ShaderMode, run_pixelbender_shader_impl};
-use crate::buffer_builder::BufferBuilder;
 use crate::surface::commands::{AtlasPage, Chunk, CommandRenderer, DrawCommand, draw_chunks};
 use crate::surface::target::PoolOrArcTexture;
 use crate::utils::run_copy_pipeline;
@@ -331,9 +331,14 @@ impl ChunkSink<'_> {
             } => {
                 self.flush(descriptors, dynamic_transforms, draw_encoder, texture_pool);
                 match blend_mode {
-                    ChunkBlendMode::Shader(shader) => {
-                        self.shader_blend(texture, shader, needs_stencil, descriptors, draw_encoder, texture_pool)
-                    }
+                    ChunkBlendMode::Shader(shader) => self.shader_blend(
+                        texture,
+                        shader,
+                        needs_stencil,
+                        descriptors,
+                        draw_encoder,
+                        texture_pool,
+                    ),
                     ChunkBlendMode::Complex(ComplexBlend::Alpha | ComplexBlend::Erase)
                         if matches!(self.blend_parent, LayerRef::None) =>
                     {
@@ -397,7 +402,11 @@ impl ChunkSink<'_> {
             if chunk.len() > 1 {
                 crate::perf_counters::inc(crate::perf_counters::PASS_MERGED);
             }
-            match self.page_binds.iter().find(|(known, _)| Arc::ptr_eq(known, page)) {
+            match self
+                .page_binds
+                .iter()
+                .find(|(known, _)| Arc::ptr_eq(known, page))
+            {
                 Some((_, binds)) => binds.clone(),
                 None => {
                     let binds = descriptors
@@ -494,9 +503,7 @@ impl ChunkSink<'_> {
                     index: 0,
                     channels: 0xFF,
                     name: "background".to_string(),
-                    texture: Some(ImageInputTexture::TextureRef(
-                        parent_blend_buffer.texture(),
-                    )),
+                    texture: Some(ImageInputTexture::TextureRef(parent_blend_buffer.texture())),
                 },
                 PixelBenderShaderArgument::ImageInput {
                     index: 1,
@@ -617,16 +624,21 @@ impl ChunkSink<'_> {
                     render_pass.set_stencil_reference(self.num_masks);
                 }
             }
-            render_pass
-                .set_pipeline(self.pipelines.complex_blends[blend_mode].pipeline_for(self.mask_state));
+            render_pass.set_pipeline(
+                self.pipelines.complex_blends[blend_mode].pipeline_for(self.mask_state),
+            );
         } else {
-            render_pass.set_pipeline(self.pipelines.complex_blends[blend_mode].stencilless_pipeline());
+            render_pass
+                .set_pipeline(self.pipelines.complex_blends[blend_mode].stencilless_pipeline());
         }
 
         render_pass.set_bind_group(2, &blend_bind_group, &[]);
 
         render_pass.set_vertex_buffer(0, descriptors.quad.vertices_pos.slice(..));
-        render_pass.set_index_buffer(descriptors.quad.indices.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.set_index_buffer(
+            descriptors.quad.indices.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
 
         if let Some(rect) = rect {
             render_pass.set_viewport(

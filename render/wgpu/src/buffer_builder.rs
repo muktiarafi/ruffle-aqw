@@ -64,7 +64,10 @@ impl BufferBuilder {
         &mut self,
         value: &[T],
     ) -> Result<Range<wgpu::BufferAddress>, BufferFull> {
-        let start = self.inner.len().next_multiple_of(std::mem::size_of::<T>().max(1));
+        let start = self
+            .inner
+            .len()
+            .next_multiple_of(std::mem::size_of::<T>().max(1));
         if (start + std::mem::size_of_val(value)) as u64 > self.limit {
             return Err(BufferFull);
         }
@@ -76,23 +79,6 @@ impl BufferBuilder {
     /// AQW build: the bytes added so far (see `crate::arena`).
     pub fn bytes(&self) -> &[u8] {
         &self.inner
-    }
-
-    pub fn finish(
-        self,
-        device: &wgpu::Device,
-        label: Option<String>,
-        usage: wgpu::BufferUsages,
-    ) -> wgpu::Buffer {
-        // AQW build: without wgpu's panic when the GPU is out of memory.
-        crate::utils::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: label.as_deref(),
-                contents: &self.inner,
-                usage,
-            },
-        )
     }
 
     pub fn copy_to(

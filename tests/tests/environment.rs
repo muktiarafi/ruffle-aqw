@@ -111,7 +111,9 @@ mod renderer {
         // AQW build: with `RUFFLE_RENDER_THREAD` set, the tests record their pictures on a
         // render thread too (see `ruffle_render_wgpu::render_thread`).
         let backend: Box<dyn RenderBackend> = if ruffle_render_wgpu::render_thread::enabled() {
-            Box::new(ruffle_render_wgpu::render_thread::ThreadedBackend::new(backend))
+            Box::new(ruffle_render_wgpu::render_thread::ThreadedBackend::new(
+                backend,
+            ))
         } else {
             Box::new(backend)
         };

@@ -178,8 +178,7 @@ impl ShapeUploader {
         if std::mem::take(&mut self.written) > BELT_KEEP {
             // Its buffers are freed when the GPU is done with the copies.
             self.belt.finish();
-            self.belt =
-                wgpu::util::StagingBelt::new(self.descriptors.device.clone(), BELT_CHUNK);
+            self.belt = wgpu::util::StagingBelt::new(self.descriptors.device.clone(), BELT_CHUNK);
             self.belts_dropped += 1;
         } else {
             self.belt.finish_and_recall_on_submit(&encoder);

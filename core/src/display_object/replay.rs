@@ -15,9 +15,9 @@ use crate::display_object::graphic::Graphic;
 use crate::display_object::{
     DisplayObject, DisplayObjectBase, RenderOptions, TDisplayObject, interp, render_base,
 };
-use ruffle_render::blend::ExtendedBlendMode;
 use crate::tessellation_cache::{Measure, TessellationCache};
 use gc_arena::Collect;
+use ruffle_render::blend::ExtendedBlendMode;
 use ruffle_render::commands::{Command, CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::matrix::Matrix;
 use ruffle_render::tessellator::EdgeMode;
@@ -132,12 +132,14 @@ enum Fault {
 
 fn fault() -> Fault {
     static FAULT: std::sync::OnceLock<Fault> = std::sync::OnceLock::new();
-    *FAULT.get_or_init(|| match std::env::var("RUFFLE_LEAN_RENDER_FAULT").as_deref() {
-        Err(_) => Fault::None,
-        Ok("climb") => Fault::Climb,
-        Ok("invalidate") => Fault::Invalidate,
-        Ok(_) => Fault::All,
-    })
+    *FAULT.get_or_init(
+        || match std::env::var("RUFFLE_LEAN_RENDER_FAULT").as_deref() {
+            Err(_) => Fault::None,
+            Ok("climb") => Fault::Climb,
+            Ok("invalidate") => Fault::Invalidate,
+            Ok(_) => Fault::All,
+        },
+    )
 }
 
 /// Whether recordings are kept for lean render, and objects marked dirty.
@@ -186,7 +188,8 @@ impl Note {
     }
 
     fn stamp(&self, generation: u32, node: u32) {
-        self.stamp.set((u64::from(generation) << 32) | u64::from(node));
+        self.stamp
+            .set((u64::from(generation) << 32) | u64::from(node));
     }
 
     /// Its node in the recording of `generation`, if it was stamped for it.
@@ -323,7 +326,10 @@ fn describe(object: DisplayObject<'_>) -> String {
 /// The check: a branch of the last program (`node`) gave other commands than its walk. The
 /// deepest node below it of which that is true too (the node itself, if none is).
 fn blame<'gc>(context: &mut RenderContext<'_, 'gc>, prev: &Program<'gc>, node: u32) -> u32 {
-    let end = prev.nodes[node as usize].seg.nodes_end.min(prev.nodes.len() as u32);
+    let end = prev.nodes[node as usize]
+        .seg
+        .nodes_end
+        .min(prev.nodes.len() as u32);
     let drawn = Drawn {
         nodes: &prev.nodes,
         drawn: &prev.drawn,
@@ -424,16 +430,34 @@ fn difference(reused: &[Command], walked: &[Command]) -> Option<String> {
                 },
             ) => a == b && same_transform(ta, tb) && sa == sb && same_debug(pa, pb) && ra == rb,
             (
-                Command::RenderStage3D { bitmap: a, transform: ta },
-                Command::RenderStage3D { bitmap: b, transform: tb },
+                Command::RenderStage3D {
+                    bitmap: a,
+                    transform: ta,
+                },
+                Command::RenderStage3D {
+                    bitmap: b,
+                    transform: tb,
+                },
             ) => a == b && same_transform(ta, tb),
             (
-                Command::RenderShape { shape: a, transform: ta },
-                Command::RenderShape { shape: b, transform: tb },
+                Command::RenderShape {
+                    shape: a,
+                    transform: ta,
+                },
+                Command::RenderShape {
+                    shape: b,
+                    transform: tb,
+                },
             ) => crate::tessellation_cache::made_alike(a, b) && same_transform(ta, tb),
             (
-                Command::RenderAlphaMask { maskee_commands: a, mask_commands: ma },
-                Command::RenderAlphaMask { maskee_commands: b, mask_commands: mb },
+                Command::RenderAlphaMask {
+                    maskee_commands: a,
+                    mask_commands: ma,
+                },
+                Command::RenderAlphaMask {
+                    maskee_commands: b,
+                    mask_commands: mb,
+                },
             ) => {
                 if let Some(inner) = difference(&a.commands, &b.commands)
                     .or_else(|| difference(&ma.commands, &mb.commands))
@@ -443,16 +467,34 @@ fn difference(reused: &[Command], walked: &[Command]) -> Option<String> {
                 true
             }
             (
-                Command::DrawRect { color: a, matrix: ma },
-                Command::DrawRect { color: b, matrix: mb },
+                Command::DrawRect {
+                    color: a,
+                    matrix: ma,
+                },
+                Command::DrawRect {
+                    color: b,
+                    matrix: mb,
+                },
             )
             | (
-                Command::DrawLine { color: a, matrix: ma },
-                Command::DrawLine { color: b, matrix: mb },
+                Command::DrawLine {
+                    color: a,
+                    matrix: ma,
+                },
+                Command::DrawLine {
+                    color: b,
+                    matrix: mb,
+                },
             )
             | (
-                Command::DrawLineRect { color: a, matrix: ma },
-                Command::DrawLineRect { color: b, matrix: mb },
+                Command::DrawLineRect {
+                    color: a,
+                    matrix: ma,
+                },
+                Command::DrawLineRect {
+                    color: b,
+                    matrix: mb,
+                },
             ) => a == b && ma == mb,
             (Command::PushMask, Command::PushMask)
             | (Command::ActivateMask, Command::ActivateMask)
@@ -476,8 +518,14 @@ fn difference(reused: &[Command], walked: &[Command]) -> Option<String> {
                 command_name(pair.1),
                 match pair {
                     (
-                        Command::RenderShape { shape: a, transform: ta },
-                        Command::RenderShape { shape: b, transform: tb },
+                        Command::RenderShape {
+                            shape: a,
+                            transform: ta,
+                        },
+                        Command::RenderShape {
+                            shape: b,
+                            transform: tb,
+                        },
                     ) => format!(
                         " (the same tessellation: {}, the same transform: {})",
                         crate::tessellation_cache::made_alike(a, b),
@@ -776,7 +824,11 @@ impl<'gc> Recorder<'gc> {
     /// The stage is about to be walked, with `scene`. Returns how many commands the last
     /// lean recording's picture had (room to make for this one's).
     pub(crate) fn scene(&mut self, scene: Scene) -> usize {
-        if self.prev.as_ref().is_some_and(|prev| prev.scene != Some(scene)) {
+        if self
+            .prev
+            .as_ref()
+            .is_some_and(|prev| prev.scene != Some(scene))
+        {
             self.prev = None;
         }
         self.scene = Some(scene);
@@ -937,14 +989,18 @@ impl<'gc> Recorder<'gc> {
                             path = format!("/{}{path}", describe(o));
                             at = o.parent();
                         }
-                        lean_found(object, format!("{what}; the deepest branch that differs: {path}"));
+                        lean_found(
+                            object,
+                            format!("{what}; the deepest branch that differs: {path}"),
+                        );
                     }
                 }
             }
             context.commands.commands.extend(walked.commands);
             if result.is_err() && invalid.is_none() {
                 // (What was walked has no ops: this recording can't be used.)
-                *invalid = Some("lean render's check: a branch couldn't be drawn again".to_string());
+                *invalid =
+                    Some("lean render's check: a branch couldn't be drawn again".to_string());
             }
         } else {
             let before = context.commands.commands.len();
@@ -1045,7 +1101,11 @@ impl<'gc> Recorder<'gc> {
             return;
         }
         let list = self.lists.last_mut().expect("a list");
-        let node = self.path.last().copied().filter(|&n| self.nodes[n as usize].moving);
+        let node = self
+            .path
+            .last()
+            .copied()
+            .filter(|&n| self.nodes[n as usize].moving);
         let mut failed = None;
         let mut placeholder = false;
         for command in &commands.commands[list.accounted.min(commands.commands.len())..] {
@@ -1188,9 +1248,8 @@ impl<'gc> Recorder<'gc> {
         let parent = self.path.last().copied().unwrap_or(NONE);
         let outer = stack.transform();
         let recorded = outer.then(drawn);
-        let changes = from.is_some_and(|(matrix, color)| {
-            matrix != real.matrix || color != real.color_transform
-        });
+        let changes = from
+            .is_some_and(|(matrix, color)| matrix != real.matrix || color != real.color_transform);
         let moving = changes || (parent != NONE && self.nodes[parent as usize].moving);
         let index = self.nodes.len() as u32;
         let list = self.lists.last().expect("a list");
@@ -1449,9 +1508,8 @@ pub(crate) fn reuse_branch<'gc>(
     };
     let parent = recorder.path.last().copied();
     let outer = context.transform_stack.transform();
-    let moving = from.is_some_and(|(matrix, color)| {
-        matrix != real.matrix || color != real.color_transform
-    });
+    let moving =
+        from.is_some_and(|(matrix, color)| matrix != real.matrix || color != real.color_transform);
     if !old.seg.usable
         || moving
         || !(options.skip_masks && options.apply_transform && options.apply_matrix)
@@ -1629,7 +1687,10 @@ fn run<'gc>(
                 if Measure::of(&transform.matrix) != *measure {
                     return Err("a drawing changed scale".to_string());
                 }
-                context.commands.commands.push(with_transform(command, transform));
+                context
+                    .commands
+                    .commands
+                    .push(with_transform(command, transform));
             }
             Op::Shape { node, source } => {
                 let transform = drawn.get(*node);
@@ -1660,7 +1721,10 @@ fn run<'gc>(
             } => {
                 let transform = drawn.get(*node);
                 if !drawn.fresh && Measure::of(&transform.matrix) == *measure {
-                    context.commands.commands.push(with_transform(command, transform));
+                    context
+                        .commands
+                        .commands
+                        .push(with_transform(command, transform));
                 } else {
                     context.transform_stack.push_absolute(transform);
                     match objects[*object as usize] {

@@ -2,11 +2,11 @@ use crate::context::RenderContext;
 use crate::drawing::Drawing;
 use crate::font::FontAtlasGlyph;
 use crate::prelude::*;
+use crate::tessellation_cache::TessellationCache;
 use ruffle_render::backend::null::NullBitmapSource;
 use ruffle_render::backend::{RenderBackend, ShapeHandle};
-use ruffle_render::transform::Transform;
-use crate::tessellation_cache::TessellationCache;
 use ruffle_render::tessellator::{EdgeMode, edge_mode};
+use ruffle_render::transform::Transform;
 use std::cell::{Ref, RefCell};
 use std::rc::Rc;
 
@@ -145,11 +145,16 @@ impl GlyphShape {
                 let mut glyph = glyph.borrow_mut();
                 let (shape, handle) = glyph.shape();
                 let mode = edge_mode();
-                if !handle.as_ref().is_some_and(|(made_for, _)| *made_for == mode) {
+                if !handle
+                    .as_ref()
+                    .is_some_and(|(made_for, _)| *made_for == mode)
+                {
                     let new = renderer.register_shape((&*shape).into(), &NullBitmapSource);
                     *handle = Some((mode, new));
                 }
-                handle.as_ref().map(|(_, handle)| GlyphRenderData::from_shape(handle.clone()))
+                handle
+                    .as_ref()
+                    .map(|(_, handle)| GlyphRenderData::from_shape(handle.clone()))
             }
             GlyphShape::Drawing(drawing) => drawing
                 .register_or_replace(renderer)

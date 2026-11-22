@@ -286,9 +286,13 @@ pub(crate) fn settings_rows(
             .iter()
             .position(|&graphics| graphics == settings.graphics)
             .unwrap_or(0);
-        if let Some(choice) =
-            rows.choice(ui, "Graphics API", "Changing it restarts Mugetsu", options, current)
-        {
+        if let Some(choice) = rows.choice(
+            ui,
+            "Graphics API",
+            "Changing it restarts Mugetsu",
+            options,
+            current,
+        ) {
             changes.push(Setting::Graphics(values[choice]));
             done = true;
         }
@@ -348,14 +352,23 @@ pub(crate) fn settings_rows(
         changes.push(Setting::MemoryLimit(mb));
         done |= settled;
     }
-    if rows.action(ui, "Free memory now", "Lets go of what the game is not using") {
+    if rows.action(
+        ui,
+        "Free memory now",
+        "Lets go of what the game is not using",
+    ) {
         changes.push(Setting::FreeMemory);
         done = true;
     }
 
     // The rest.
     rows.divider(ui);
-    if rows.toggle(ui, "Show FPS", "A small counter in the corner", settings.show_fps) {
+    if rows.toggle(
+        ui,
+        "Show FPS",
+        "A small counter in the corner",
+        settings.show_fps,
+    ) {
         changes.push(Setting::ShowFps(!settings.show_fps));
         done = true;
     }
@@ -397,7 +410,9 @@ impl<'a> Rows<'a> {
                 .ok()
                 .map(|title| Id::new(title.as_str()))
         });
-        let open = ui.data(|data| data.get_temp::<Id>(Self::open_key(id))).or(test);
+        let open = ui
+            .data(|data| data.get_temp::<Id>(Self::open_key(id)))
+            .or(test);
         Self {
             z,
             id,
@@ -423,7 +438,8 @@ impl<'a> Rows<'a> {
         let row = Id::new(title);
         let (rect, response) = ui.allocate_exact_size(vec2(WIDTH * z, ROW * z), Sense::click());
         if response.hovered() {
-            ui.painter().rect_filled(rect, CornerRadius::same((8.0 * z) as u8), ROW_HOVER);
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same((8.0 * z) as u8), ROW_HOVER);
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             self.hint = Some(hint);
         }
@@ -460,7 +476,10 @@ impl<'a> Rows<'a> {
         let center = pos2(rect.right() - 13.0 * z, rect.center().y);
         let (half, tip) = (4.0 * z, if open { -2.0 * z } else { 2.0 * z });
         let stroke = Stroke::new(1.5 * z, MUTED);
-        painter.line_segment([center + vec2(-half, -tip), center + vec2(0.0, tip)], stroke);
+        painter.line_segment(
+            [center + vec2(-half, -tip), center + vec2(0.0, tip)],
+            stroke,
+        );
         painter.line_segment([center + vec2(0.0, tip), center + vec2(half, -tip)], stroke);
         open
     }
@@ -478,7 +497,13 @@ impl<'a> Rows<'a> {
         if !self.value(ui, title, hint, options[selected]) {
             return None;
         }
-        segmented(ui, self.z, &format!("{title}_{}", self.id), options, selected)
+        segmented(
+            ui,
+            self.z,
+            &format!("{title}_{}", self.id),
+            options,
+            selected,
+        )
     }
 
     /// A setting that is on or off: its name and a switch. Returns whether it was clicked.
@@ -486,7 +511,8 @@ impl<'a> Rows<'a> {
         let z = self.z;
         let (rect, response) = ui.allocate_exact_size(vec2(WIDTH * z, ROW * z), Sense::click());
         if response.hovered() {
-            ui.painter().rect_filled(rect, CornerRadius::same((8.0 * z) as u8), ROW_HOVER);
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same((8.0 * z) as u8), ROW_HOVER);
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             self.hint = Some(hint);
         }
@@ -505,10 +531,14 @@ impl<'a> Rows<'a> {
         );
         let radius = switch.height() / 2.0;
         let track = lerp_color(TRACK, ACCENT, how_on);
-        ui.painter().rect_filled(switch, CornerRadius::same(radius as u8), track);
-        let knob_x = egui::lerp((switch.left() + radius)..=(switch.right() - radius), how_on);
         ui.painter()
-            .circle_filled(pos2(knob_x, switch.center().y), radius - 3.0 * z, Color32::WHITE);
+            .rect_filled(switch, CornerRadius::same(radius as u8), track);
+        let knob_x = egui::lerp((switch.left() + radius)..=(switch.right() - radius), how_on);
+        ui.painter().circle_filled(
+            pos2(knob_x, switch.center().y),
+            radius - 3.0 * z,
+            Color32::WHITE,
+        );
         response.clicked()
     }
 
@@ -565,7 +595,12 @@ fn focus_number_row(ui: &Ui, id: &str) {
 /// The limit counts what Task Manager shows (see `mugetsu::task_manager_mb`; the user's
 /// decision of 2026-11-16, with these presets): the line with the figure says the same
 /// number. (While it counted committed memory the presets were 3, 4 and 6 GB.)
-pub(crate) fn memory_limit_rows(ui: &mut Ui, z: f32, id: &str, current_mb: u32) -> Option<(u32, bool)> {
+pub(crate) fn memory_limit_rows(
+    ui: &mut Ui,
+    z: f32,
+    id: &str,
+    current_mb: u32,
+) -> Option<(u32, bool)> {
     const OPTIONS: [&str; 5] = ["Off", "1 GB", "2 GB", "3 GB", "Custom"];
     /// What "Custom" starts at, until a number is typed.
     const FIRST_CUSTOM_MB: u32 = 1500;
@@ -596,8 +631,15 @@ pub(crate) fn memory_limit_rows(ui: &mut Ui, z: f32, id: &str, current_mb: u32) 
         None => None,
     };
     if selected == 4
-        && let Some(typed) =
-            number_row(ui, z, id, "Custom (MB)", "Enter to apply", current_mb, 512..=65536)
+        && let Some(typed) = number_row(
+            ui,
+            z,
+            id,
+            "Custom (MB)",
+            "Enter to apply",
+            current_mb,
+            512..=65536,
+        )
     {
         picked = Some((typed, true));
     }
@@ -717,7 +759,10 @@ pub(crate) fn number_row(
     }
     text.retain(|c| c.is_ascii_digit());
     let entered = response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-    let typed = text.parse::<u32>().ok().filter(|number| range.contains(number));
+    let typed = text
+        .parse::<u32>()
+        .ok()
+        .filter(|number| range.contains(number));
     if response.has_focus() {
         ui.data_mut(|data| data.insert_temp(key, text));
     } else {
@@ -734,13 +779,23 @@ pub(crate) fn panel_style(style: &mut Style) {
 }
 
 /// Pill-shaped choices side by side; returns the one clicked, if it isn't `selected`.
-pub(crate) fn segmented(ui: &mut Ui, z: f32, id: &str, options: &[&str], selected: usize) -> Option<usize> {
+pub(crate) fn segmented(
+    ui: &mut Ui,
+    z: f32,
+    id: &str,
+    options: &[&str],
+    selected: usize,
+) -> Option<usize> {
     let (rect, _) = ui.allocate_exact_size(vec2(WIDTH * z, 30.0 * z), Sense::hover());
     let rect = rect.shrink2(vec2(6.0 * z, 2.0 * z));
-    ui.painter().rect_filled(rect, CornerRadius::same((13.0 * z) as u8), TRACK);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same((13.0 * z) as u8), TRACK);
     // Each choice gets room by the length of its word: of equal widths, "Custom" touched the
     // menu's edge beside "Off".
-    let weights: Vec<f32> = options.iter().map(|option| option.chars().count() as f32 + 3.0).collect();
+    let weights: Vec<f32> = options
+        .iter()
+        .map(|option| option.chars().count() as f32 + 3.0)
+        .collect();
     let total: f32 = weights.iter().sum();
     let mut left = rect.left();
     let mut chosen = None;
@@ -753,7 +808,8 @@ pub(crate) fn segmented(ui: &mut Ui, z: f32, id: &str, options: &[&str], selecte
         let pill = cell.shrink(2.0 * z);
         let pill_radius = CornerRadius::same((11.0 * z) as u8);
         if active > 0.0 {
-            ui.painter().rect_filled(pill, pill_radius, ACCENT.gamma_multiply(active));
+            ui.painter()
+                .rect_filled(pill, pill_radius, ACCENT.gamma_multiply(active));
         } else if response.hovered() {
             ui.painter().rect_filled(pill, pill_radius, ROW_HOVER);
         }
@@ -778,7 +834,8 @@ pub(crate) fn segmented(ui: &mut Ui, z: f32, id: &str, options: &[&str], selecte
 pub(crate) fn action_row(ui: &mut Ui, z: f32, title: &str, right: Option<&str>) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(WIDTH * z, 30.0 * z), Sense::click());
     if response.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same((8.0 * z) as u8), ROW_HOVER);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same((8.0 * z) as u8), ROW_HOVER);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     ui.painter().text(

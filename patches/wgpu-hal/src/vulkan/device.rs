@@ -1297,7 +1297,9 @@ impl crate::Device for super::Device {
             }
             super::TextureMemory::KindAllocation(allocation, kind) => {
                 self.counters.texture_memory.sub(allocation.size() as isize);
-                let result = self.kind_allocators[kind as usize - 1].lock().free(allocation);
+                let result = self.kind_allocators[kind as usize - 1]
+                    .lock()
+                    .free(allocation);
                 if let Err(err) = result {
                     log::warn!("Failed to free texture allocation: {err}");
                 }

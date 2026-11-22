@@ -28,13 +28,13 @@ type Error = Box<dyn std::error::Error>;
 
 #[macro_use]
 pub mod utils;
-pub mod segments;
-pub mod present;
-pub mod render_thread;
-pub mod layer_cache;
+mod arena;
 /// Turu: the GPU's time per frame, for the perf log ([`gpu_timing::take`]).
 pub mod gpu_timing;
-mod arena;
+pub mod layer_cache;
+pub mod present;
+pub mod render_thread;
+pub mod segments;
 pub mod shape_uploads;
 
 mod bitmaps;
@@ -48,15 +48,15 @@ pub mod backend;
 mod blend;
 mod buffer_builder;
 mod buffer_pool;
+mod cache_batch;
 #[cfg(feature = "clap")]
 pub mod clap;
 pub mod descriptors;
 mod dynamic_transforms;
 mod filters;
-mod cache_batch;
-mod packing;
 mod layouts;
 mod mesh;
+mod packing;
 mod shaders;
 mod surface;
 
@@ -146,7 +146,12 @@ impl From<TessVertex> for PosColorVertex {
     fn from(vertex: TessVertex) -> Self {
         Self {
             position: [vertex.x, vertex.y],
-            color: [vertex.color.r, vertex.color.g, vertex.color.b, vertex.color.a],
+            color: [
+                vertex.color.r,
+                vertex.color.g,
+                vertex.color.b,
+                vertex.color.a,
+            ],
         }
     }
 }
@@ -326,7 +331,9 @@ impl TextureRecycler {
         let bytes = |t: &wgpu::Texture| u64::from(t.width()) * u64::from(t.height()) * 4;
         let mut total: u64 = inner.idle.iter().map(|(_, t)| bytes(t)).sum();
         if total > max_bytes {
-            inner.idle.sort_by_key(|(freed, _)| std::cmp::Reverse(*freed));
+            inner
+                .idle
+                .sort_by_key(|(freed, _)| std::cmp::Reverse(*freed));
             while total > max_bytes {
                 let Some((_, t)) = inner.idle.pop() else {
                     break;
@@ -347,7 +354,7 @@ impl TextureRecycler {
 #[derive(Debug)]
 pub struct Texture {
     /// AQW build: counted in the perf log until the bitmap is freed.
-    live: Option<perf_counters::LiveBitmap>,
+    _live: Option<perf_counters::LiveBitmap>,
     /// AQW build: where this texture goes when freed, for reuse (cacheAsBitmap textures only).
     recycle: Option<Arc<TextureRecycler>>,
     pub(crate) texture: wgpu::Texture,
@@ -387,7 +394,10 @@ impl Texture {
 
     /// AQW build: what identifies the texture's current contents.
     pub(crate) fn stamp(&self) -> (u64, u64) {
-        (self.id, self.version.load(std::sync::atomic::Ordering::Relaxed))
+        (
+            self.id,
+            self.version.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     pub fn bind_group(
@@ -888,9 +898,7 @@ pub(crate) fn catch_out_of_memory<R>(device: &wgpu::Device, f: impl FnOnce() -> 
 /// their memory is really released (including resources only kept alive by finished command
 /// buffers waiting on wgpu's background drop thread).
 pub(crate) fn release_gpu_memory(descriptors: &descriptors::Descriptors) {
-    let _ = descriptors
-        .device
-        .poll(wgpu::PollType::wait_indefinitely());
+    let _ = descriptors.device.poll(wgpu::PollType::wait_indefinitely());
     #[cfg(not(target_family = "wasm"))]
     wgpu_core::aqw_flush_encoder_drops();
 }

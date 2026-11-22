@@ -93,7 +93,10 @@ pub(crate) fn census<'gc, R: Collect<'gc>>(root: &R) -> HashMap<String, u64> {
         // SAFETY: every pointer here was reached through strong edges from the root, so it is
         // live, and no collection runs during this walk.
         let kind = unsafe { describe(node, None) };
-        let kind = kind.strip_prefix("ruffle_core::").unwrap_or(&kind).to_string();
+        let kind = kind
+            .strip_prefix("ruffle_core::")
+            .unwrap_or(&kind)
+            .to_string();
         *counts.entry(kind).or_default() += 1;
         unsafe { visit_edges(node, &mut StrongEdges(&mut edges)) };
         for child in edges.drain(..) {

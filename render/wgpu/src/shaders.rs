@@ -103,7 +103,12 @@ impl Shaders {
         );
 
         let blend_shaders = EnumMap::from_fn(|blend: ComplexBlend| {
-            make_shader(device, &format!("blend/{blend:?}"), blend_source(blend), max_transforms)
+            make_shader(
+                device,
+                &format!("blend/{blend:?}"),
+                blend_source(blend),
+                max_transforms,
+            )
         });
 
         Self {
@@ -263,9 +268,11 @@ mod tests {
             ("gradient", include_str!("../shaders/gradient.wgsl")),
             ("bitmap", include_str!("../shaders/bitmap.wgsl")),
         ] {
-            let full = format!("{common}
+            let full = format!(
+                "{common}
 const max_transforms = 64;
-{source}");
+{source}"
+            );
             let module = naga::front::wgsl::parse_str(&full)
                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&full)));
             naga::valid::Validator::new(

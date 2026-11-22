@@ -275,10 +275,12 @@ pub fn aqw_texture_kind<R>(kind: u8, f: impl FnOnce() -> R) -> R {
 
 /// AQW build: (encoders waiting to be dropped, submissions in flight), for Ruffle's perf log.
 pub fn aqw_stats() -> (usize, usize) {
-    use core::sync::atomic::Ordering::Relaxed;
     use aqw_stats::*;
+    use core::sync::atomic::Ordering::Relaxed;
     (
-        ENCODERS_QUEUED.load(Relaxed).saturating_sub(ENCODERS_DROPPED.load(Relaxed)),
+        ENCODERS_QUEUED
+            .load(Relaxed)
+            .saturating_sub(ENCODERS_DROPPED.load(Relaxed)),
         ACTIVE_SUBMISSIONS.load(Relaxed),
     )
 }

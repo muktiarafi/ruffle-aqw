@@ -1529,7 +1529,11 @@ impl crate::Queue for Queue {
                 vk_cmd_buffers = rest;
                 let mut batch_timeline_info = mem::MaybeUninit::uninit();
                 let batch_info = SemaphoreList::add_to_submit(
-                    if first { &mut wait_semaphores } else { &mut no_wait },
+                    if first {
+                        &mut wait_semaphores
+                    } else {
+                        &mut no_wait
+                    },
                     &mut no_signal,
                     vk::SubmitInfo::default().command_buffers(batch),
                     &mut batch_timeline_info,

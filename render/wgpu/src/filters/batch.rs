@@ -349,7 +349,11 @@ impl FilterBatch {
                     // Every slot skips this pass: nothing changes (no pass in `BlurFilter` either).
                     continue;
                 }
-                let previous_view = if first { &source_view } else { flip.color_view() };
+                let previous_view = if first {
+                    &source_view
+                } else {
+                    flip.color_view()
+                };
                 first = false;
                 crate::utils::staging_write(
                     &mut *staging_belt,
@@ -359,7 +363,7 @@ impl FilterBatch {
                     wgpu::BufferSize::new((instances.len() * size_of::<BlurInstance>()) as u64)
                         .expect("at least one slot"),
                 )
-                    .copy_from_slice(bytemuck::cast_slice(&instances));
+                .copy_from_slice(bytemuck::cast_slice(&instances));
                 let bind_group = descriptors
                     .device
                     .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -445,7 +449,7 @@ impl FilterBatch {
             wgpu::BufferSize::new((instances.len() * size_of::<GlowInstance>()) as u64)
                 .expect("at least one slot"),
         )
-            .copy_from_slice(bytemuck::cast_slice(&instances));
+        .copy_from_slice(bytemuck::cast_slice(&instances));
         let target = Self::new_page_target(descriptors, texture_pool, draw_encoder, page);
         let source_view = source.create_view(&Default::default());
         let blurred_view = blurred.create_view(&Default::default());

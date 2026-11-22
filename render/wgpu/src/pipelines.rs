@@ -97,9 +97,8 @@ impl Pipelines {
         blend: ComplexBlend,
     ) -> &ShapePipeline {
         self.complex_blends_page[blend].get_or_init(|| {
-            let _timer = crate::perf_counters::timers::Scoped::new(
-                crate::perf_counters::timers::PIPELINE,
-            );
+            let _timer =
+                crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
             let layouts = &descriptors.bind_layouts;
             create_shape_pipeline(
                 &format!("Complex Blend from a page: {blend:?}"),

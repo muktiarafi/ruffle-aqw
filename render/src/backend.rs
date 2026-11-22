@@ -120,9 +120,18 @@ pub trait RenderBackend: Any {
     ) -> Vec<(u64, TessellatedShape)> {
         jobs.into_iter()
             .map(|(ticket, shape, scale, stretch, source)| {
-                let handle = self.register_shape_stretched((&*shape).into(), source, scale, stretch);
+                let handle =
+                    self.register_shape_stretched((&*shape).into(), source, scale, stretch);
                 let data = Box::new(handle);
-                (ticket, TessellatedShape { data, micros: 0, vertices: 0, indices: 0 })
+                (
+                    ticket,
+                    TessellatedShape {
+                        data,
+                        micros: 0,
+                        vertices: 0,
+                        indices: 0,
+                    },
+                )
             })
             .collect()
     }
@@ -145,7 +154,11 @@ pub trait RenderBackend: Any {
         shape: TessellatedShape,
         _bitmap_source: &dyn BitmapSource,
     ) -> Option<ShapeHandle> {
-        shape.data.downcast::<ShapeHandle>().ok().map(|handle| *handle)
+        shape
+            .data
+            .downcast::<ShapeHandle>()
+            .ok()
+            .map(|handle| *handle)
     }
 
     fn render_offscreen(

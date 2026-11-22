@@ -817,7 +817,8 @@ impl Drop for Device {
         let shared_buffers = mem::take(self.sampler_index_buffers.get_mut());
         for (_, shared) in shared_buffers {
             if let Some(SamplerIndexBuffer { buffer, allocation }) = Arc::into_inner(shared) {
-                suballocation::DeviceAllocationContext::from(&*self).free_resource(buffer, allocation);
+                suballocation::DeviceAllocationContext::from(&*self)
+                    .free_resource(buffer, allocation);
             }
         }
         if self
@@ -1861,10 +1862,14 @@ impl crate::Queue for Queue {
         }
         self.command_list_pool
             .lock()
-            .extend(command_buffers.iter().filter_map(|cmd_buf| match &cmd_buf.raw {
-                CommandBufferRaw::Native(list) => Some(list.clone()),
-                CommandBufferRaw::Recorded(_) => None,
-            }));
+            .extend(
+                command_buffers
+                    .iter()
+                    .filter_map(|cmd_buf| match &cmd_buf.raw {
+                        CommandBufferRaw::Native(list) => Some(list.clone()),
+                        CommandBufferRaw::Recorded(_) => None,
+                    }),
+            );
 
         unsafe { self.raw.Signal(&signal_fence.raw, signal_value) }
             .into_device_result("Signal fence")?;

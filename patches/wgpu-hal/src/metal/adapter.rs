@@ -61,7 +61,7 @@ impl super::Adapter {
         &self.shared.device
     }
     pub fn memory_budget(&self) -> Option<(u64, u64)> {
-        let budget = self.shared.device.recommendedMaxWorkingSetSize() as u64;
+        let budget = self.shared.device.recommendedMaxWorkingSetSize();
         (budget != 0).then(|| (budget, self.shared.device.currentAllocatedSize() as u64))
     }
 }

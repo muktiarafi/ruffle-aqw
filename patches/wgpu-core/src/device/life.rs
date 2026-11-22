@@ -346,7 +346,8 @@ impl LifetimeTracker {
         // destroys the ones that were only kept alive by the GPU work), so can be _very_
         // expensive.
         drop_finished_encoders(finished);
-        crate::aqw_stats::ACTIVE_SUBMISSIONS.store(self.active.len(), core::sync::atomic::Ordering::Relaxed);
+        crate::aqw_stats::ACTIVE_SUBMISSIONS
+            .store(self.active.len(), core::sync::atomic::Ordering::Relaxed);
         work_done_closures
     }
 
@@ -468,7 +469,8 @@ fn drop_finished_encoders(encoders: Vec<EncoderInFlight>) {
     let count = encoders.len();
     let encoders = match sender {
         Some(sender) => match sender.lock().map(|s| {
-            crate::aqw_stats::ENCODERS_QUEUED.fetch_add(count, core::sync::atomic::Ordering::Relaxed);
+            crate::aqw_stats::ENCODERS_QUEUED
+                .fetch_add(count, core::sync::atomic::Ordering::Relaxed);
             s.send(encoders)
         }) {
             Ok(Ok(())) => return,
@@ -504,4 +506,3 @@ fn drop_finished_encoders(encoders: Vec<EncoderInFlight>) {
     profiling::scope!("drop command buffer trackers");
     drop(encoders);
 }
-

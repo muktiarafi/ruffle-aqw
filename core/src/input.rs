@@ -9,10 +9,7 @@ use std::collections::{HashMap, HashSet};
 pub enum KeyCodeMappingType {
     // TODO Make this configurable, it's not
     //   yet possible to use this mapping type.
-    #[cfg_attr(
-        not(any(target_os = "linux", target_os = "macos")),
-        expect(dead_code)
-    )]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), expect(dead_code))]
     Physical,
     #[cfg_attr(any(target_os = "linux", target_os = "macos"), expect(dead_code))]
     Logical,

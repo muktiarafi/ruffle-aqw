@@ -484,7 +484,7 @@ pub(super) fn run_pixelbender_shader_impl(
 
                         BitmapHandle(Arc::new(Texture {
                             recycle: None,
-                            live: None,
+                            _live: None,
                             texture: fresh_texture,
                             repeating_linear: Default::default(),
                             repeating_nearest: Default::default(),

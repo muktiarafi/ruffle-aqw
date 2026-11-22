@@ -33,11 +33,7 @@ where
         match evt {
             PathEvent::Begin { .. } => {}
             PathEvent::Line { from, to } => {
-                test_segment(
-                    *point,
-                    &LineSegment { from, to },
-                    &mut winding,
-                );
+                test_segment(*point, &LineSegment { from, to }, &mut winding);
             }
             PathEvent::End { last, first, .. } => {
                 test_segment(
@@ -85,20 +81,13 @@ where
     winding
 }
 
-fn test_segment(
-    point: Point,
-    segment: &LineSegment<f32>,
-    winding: &mut i32,
-) {
+fn test_segment(point: Point, segment: &LineSegment<f32>, winding: &mut i32) {
     let y0 = segment.from.y;
     let y1 = segment.to.y;
     let min_y = f32::min(y0, y1);
     let max_y = f32::max(y0, y1);
 
-    if min_y > point.y
-        || max_y <= point.y
-        || f32::min(segment.from.x, segment.to.x) > point.x
-    {
+    if min_y > point.y || max_y <= point.y || f32::min(segment.from.x, segment.to.x) > point.x {
         return;
     }
 
@@ -107,7 +96,6 @@ fn test_segment(
     }
 
     let d = y1 - y0;
-
 
     let t = (point.y - y0) / d;
     let x = segment.sample(t).x;

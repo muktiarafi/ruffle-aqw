@@ -138,7 +138,9 @@ struct AssertSend<T>(T);
 unsafe impl<T> Send for AssertSend<T> {}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A `WgpuRenderBackend` whose pictures are recorded on a render thread (see the module).
@@ -286,7 +288,9 @@ impl<T: RenderTarget + 'static> ThreadedBackend<T> {
     }
 
     fn thread(&self) -> &PresentThread {
-        self.thread.as_ref().expect("the render thread is there until the backend is dropped")
+        self.thread
+            .as_ref()
+            .expect("the render thread is there until the backend is dropped")
     }
 
     /// Waits until the picture handed to the render thread has been recorded. How long that
@@ -588,7 +592,11 @@ impl<T: RenderTarget + 'static> RenderBackend for ThreadedBackend<T> {
         let handles = meshes
             .into_iter()
             .map(|(bounds, lyon_mesh)| {
-                ShapeHandle(Arc::new(self.upload_direct(bounds, lyon_mesh, bitmap_source)))
+                ShapeHandle(Arc::new(self.upload_direct(
+                    bounds,
+                    lyon_mesh,
+                    bitmap_source,
+                )))
             })
             .collect();
         crate::perf_counters::add(crate::perf_counters::SHAPES_BATCHED, shapes.len() as u32);
@@ -765,7 +773,9 @@ impl<T: RenderTarget + 'static> RenderBackend for ThreadedBackend<T> {
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
         if self.sync_only {
-            self.backend_for("submit_frame").0.submit_frame(clear, commands, cache_entries);
+            self.backend_for("submit_frame")
+                .0
+                .submit_frame(clear, commands, cache_entries);
             return;
         }
         // One picture at a time.
@@ -829,7 +839,9 @@ impl<T: RenderTarget + 'static> RenderBackend for ThreadedBackend<T> {
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap<'_>) -> Result<BitmapHandle, Error> {
-        self.backend_for("register_bitmap").0.register_bitmap(bitmap)
+        self.backend_for("register_bitmap")
+            .0
+            .register_bitmap(bitmap)
     }
 
     fn update_texture(
@@ -838,7 +850,9 @@ impl<T: RenderTarget + 'static> RenderBackend for ThreadedBackend<T> {
         bitmap: Bitmap<'_>,
         region: PixelRegion,
     ) -> Result<(), Error> {
-        self.backend_for("update_texture").0.update_texture(handle, bitmap, region)
+        self.backend_for("update_texture")
+            .0
+            .update_texture(handle, bitmap, region)
     }
 
     fn create_context3d(&mut self, profile: Context3DProfile) -> Result<Box<dyn Context3D>, Error> {
@@ -851,7 +865,9 @@ impl<T: RenderTarget + 'static> RenderBackend for ThreadedBackend<T> {
             );
         }
         self.sync_only = true;
-        self.backend_for("create_context3d").0.create_context3d(profile)
+        self.backend_for("create_context3d")
+            .0
+            .create_context3d(profile)
     }
 
     fn debug_info(&self) -> Cow<'static, str> {
@@ -870,7 +886,9 @@ impl<T: RenderTarget + 'static> RenderBackend for ThreadedBackend<T> {
         &mut self,
         shader: PixelBenderShader,
     ) -> Result<PixelBenderShaderHandle, Error> {
-        self.backend_for("compile_pixelbender_shader").0.compile_pixelbender_shader(shader)
+        self.backend_for("compile_pixelbender_shader")
+            .0
+            .compile_pixelbender_shader(shader)
     }
 
     fn run_pixelbender_shader(
@@ -889,6 +907,8 @@ impl<T: RenderTarget + 'static> RenderBackend for ThreadedBackend<T> {
         handle: Box<dyn SyncHandle>,
         with_rgba: RgbaBufRead,
     ) -> Result<(), Error> {
-        self.backend_for("resolve_sync_handle").0.resolve_sync_handle(handle, with_rgba)
+        self.backend_for("resolve_sync_handle")
+            .0
+            .resolve_sync_handle(handle, with_rgba)
     }
 }

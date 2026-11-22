@@ -309,7 +309,10 @@ pub mod frame_script_retry {
             let len = p.len();
             let mut child = button;
             while let Some(parent) = child.parent() {
-                if child.as_movie_clip().is_some_and(|clip| !clip.initialized()) {
+                if child
+                    .as_movie_clip()
+                    .is_some_and(|clip| !clip.initialized())
+                {
                     p.push(parent.as_ptr());
                 }
                 child = parent;
@@ -2818,7 +2821,6 @@ impl<'gc> MovieClip<'gc> {
         }
     }
 
-
     /// `construct_frame` for this clip (known not to be settled) and everything below it.
     fn construct_frame_all(self, context: &mut UpdateContext<'gc>) {
         // AVM1 code expects to execute in line with timeline instructions, so
@@ -2944,12 +2946,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         // The lean walks' check: a clip they would have skipped is walked all the same.
         if settle::lean_verify() && self.base().settled.is_carried() {
             if !self.settle_conditions(|clip| clip.base().settled.is_marked()) {
-                settle::violation("construct_frame", "it is not settled any more", self.describe());
+                settle::violation(
+                    "construct_frame",
+                    "it is not settled any more",
+                    self.describe(),
+                );
             }
             let before = settle::work_count();
             self.construct_frame_all(context);
             if settle::work_count() != before {
-                settle::violation("construct_frame", "the walk did work in it", self.describe());
+                settle::violation(
+                    "construct_frame",
+                    "the walk did work in it",
+                    self.describe(),
+                );
             }
             return;
         }
@@ -2965,7 +2975,11 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         settle::visited(settle::SCRIPTS);
         let checked = (settle::lean_verify() && self.base().settled.is_carried()).then(|| {
             if !self.settle_conditions(|clip| clip.base().settled.is_marked()) {
-                settle::violation("run_frame_scripts", "it is not settled any more", self.describe());
+                settle::violation(
+                    "run_frame_scripts",
+                    "it is not settled any more",
+                    self.describe(),
+                );
             }
             settle::work_count()
         });
@@ -2978,7 +2992,11 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
         if let Some(before) = checked
             && settle::work_count() != before
         {
-            settle::violation("run_frame_scripts", "the walk did work in it", self.describe());
+            settle::violation(
+                "run_frame_scripts",
+                "the walk did work in it",
+                self.describe(),
+            );
         }
         if self.can_settle() {
             self.set_settled();

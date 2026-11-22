@@ -413,7 +413,9 @@ impl ShapeTessellator {
                             for (part, alpha) in &centered.thin {
                                 let mut builder = BuffersBuilder::new(
                                     &mut self.lyon_mesh,
-                                    RuffleVertexCtor { color: edge_aa::with_alpha(color, *alpha) },
+                                    RuffleVertexCtor {
+                                        color: edge_aa::with_alpha(color, *alpha),
+                                    },
                                 );
                                 let _ = self.fill_tess.tessellate_path(
                                     part,
@@ -434,8 +436,13 @@ impl ShapeTessellator {
                         ),
                     },
                     DrawPath::Stroke { style, .. } => {
-                        let width = (style.width().to_pixels() as f32)
-                            .max(if line_scale.abs() > TESSELLATION_EPSILON { 1.0 / line_scale } else { 1.0 });
+                        let width = (style.width().to_pixels() as f32).max(
+                            if line_scale.abs() > TESSELLATION_EPSILON {
+                                1.0 / line_scale
+                            } else {
+                                1.0
+                            },
+                        );
                         edge_aa::stroke(
                             &mut self.lyon_mesh,
                             &lyon_path,
@@ -744,7 +751,9 @@ mod edge_aa {
                 PathEvent::Begin { at } => lines.push((vec![at], false)),
                 PathEvent::Line { to, .. } => {
                     if let Some((line, _)) = lines.last_mut()
-                        && line.last().is_none_or(|last| (*last - to).square_length() > EPSILON)
+                        && line
+                            .last()
+                            .is_none_or(|last| (*last - to).square_length() > EPSILON)
                     {
                         line.push(to);
                     }
@@ -816,7 +825,17 @@ mod edge_aa {
         closed: bool,
         color: swf::Color,
     ) {
-        push_strip_from(mesh, points, offsets, closed, swf::Color { a: color.a / 2, ..color }, color);
+        push_strip_from(
+            mesh,
+            points,
+            offsets,
+            closed,
+            swf::Color {
+                a: color.a / 2,
+                ..color
+            },
+            color,
+        );
     }
 
     /// A strip from `points` (in `edge`) out by `offsets` (to `color` with no alpha).
@@ -836,8 +855,16 @@ mod edge_aa {
         let base = mesh.vertices.len() as u32;
         for (point, offset) in points.iter().zip(offsets) {
             let outer = *point + *offset;
-            mesh.vertices.push(Vertex { x: point.x, y: point.y, color: edge });
-            mesh.vertices.push(Vertex { x: outer.x, y: outer.y, color: clear });
+            mesh.vertices.push(Vertex {
+                x: point.x,
+                y: point.y,
+                color: edge,
+            });
+            mesh.vertices.push(Vertex {
+                x: outer.x,
+                y: outer.y,
+                color: clear,
+            });
         }
         let segments = if closed { n } else { n - 1 } as u32;
         for i in 0..segments {
@@ -852,7 +879,12 @@ mod edge_aa {
     /// Half a pixel at the scale the shape is tessellated at, and the flattening tolerance.
     fn sizes(scale: f32) -> Option<(f32, f32)> {
         let half = 0.5;
-        (scale.abs() > 1e-7).then(|| (half / scale.abs(), FillOptions::DEFAULT_TOLERANCE / scale.abs()))
+        (scale.abs() > 1e-7).then(|| {
+            (
+                half / scale.abs(),
+                FillOptions::DEFAULT_TOLERANCE / scale.abs(),
+            )
+        })
     }
 
     /// An edge as the SWF gives it, the same whichever way it's walked: its end points (and
@@ -970,7 +1002,10 @@ mod edge_aa {
                     std::sync::LazyLock::new(Default::default);
                 STATE.hash_one(bytes)
             };
-            let fills = paths.iter().filter(|path| matches!(path, DrawPath::Fill { .. })).count();
+            let fills = paths
+                .iter()
+                .filter(|path| matches!(path, DrawPath::Fill { .. }))
+                .count();
             // (Each also with the direction it's walked in, see `edge_key`.)
             let commands: usize = paths
                 .iter()
@@ -1030,14 +1065,12 @@ mod edge_aa {
                         }
                     }
                     if later && !earlier && !overlaid {
-                        sides[fill][command] = if group
-                            .iter()
-                            .all(|&(_, _, other, ..)| opaque(&paths[other]))
-                        {
-                            Side::Under
-                        } else {
-                            Side::Hard
-                        };
+                        sides[fill][command] =
+                            if group.iter().all(|&(_, _, other, ..)| opaque(&paths[other])) {
+                                Side::Under
+                            } else {
+                                Side::Hard
+                            };
                     }
                 }
             }
@@ -1062,12 +1095,15 @@ mod edge_aa {
                     let other = match neighbours.next() {
                         Some(other) if !overlaid => other,
                         _ => {
-                            sides[fill][command] = if all_opaque { Side::Faded } else { Side::Hard };
+                            sides[fill][command] =
+                                if all_opaque { Side::Faded } else { Side::Hard };
                             continue;
                         }
                     };
                     let (first, last) = neighbours
-                        .fold((fill.min(other), fill.max(other)), |(lo, hi), e| (lo.min(e), hi.max(e)));
+                        .fold((fill.min(other), fill.max(other)), |(lo, hi), e| {
+                            (lo.min(e), hi.max(e))
+                        });
                     sides[fill][command] = if !all_opaque {
                         Side::Hard
                     } else if first == last || (last > fill && first >= fill) {
@@ -1106,14 +1142,18 @@ mod edge_aa {
                         continue;
                     }
                     let seam = if group.len() > 64 {
-                        group.iter().any(|other| other.2 != fill && other.6 != forward)
+                        group
+                            .iter()
+                            .any(|other| other.2 != fill && other.6 != forward)
                     } else {
-                        group.iter().any(|&(_, _, other, other_command, s0, s1, other_forward)| {
-                            other != fill
-                                && other_forward != forward
-                                && s1.min(t1) > s0.max(t0)
-                                && sides[other][other_command] != Side::Under
-                        })
+                        group
+                            .iter()
+                            .any(|&(_, _, other, other_command, s0, s1, other_forward)| {
+                                other != fill
+                                    && other_forward != forward
+                                    && s1.min(t1) > s0.max(t0)
+                                    && sides[other][other_command] != Side::Under
+                            })
                     };
                     if seam {
                         sides[fill][command] = Side::Seam;
@@ -1150,8 +1190,11 @@ mod edge_aa {
     /// (looked up one by one through the order, this was the largest part of preparing a
     /// fill's edges).
     fn windings_at(rings: &[&[Point]], probes: &[Point]) -> Vec<i16> {
-        let mut order: Vec<(f32, u32)> =
-            probes.iter().enumerate().map(|(i, p)| (p.y, i as u32)).collect();
+        let mut order: Vec<(f32, u32)> = probes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.y, i as u32))
+            .collect();
         order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         let ys: Vec<f32> = order.iter().map(|&(y, _)| y).collect();
         let xs: Vec<f32> = order.iter().map(|&(_, i)| probes[i as usize].x).collect();
@@ -1276,7 +1319,12 @@ mod edge_aa {
             let count: usize = rings.iter().map(|points| points.len()).sum();
             let mut owners = Vec::with_capacity(count);
             let mut leaves = vec![
-                Edges8 { ax: [0.0; 8], ay: [0.0; 8], ex: [0.0; 8], ey: [0.0; 8] };
+                Edges8 {
+                    ax: [0.0; 8],
+                    ay: [0.0; 8],
+                    ex: [0.0; 8],
+                    ey: [0.0; 8]
+                };
                 count.div_ceil(8).max(1)
             ];
             let mut level = vec![Boxes8::EMPTY; leaves.len().div_ceil(8)];
@@ -1287,7 +1335,8 @@ mod edge_aa {
                     let (leaf, k) = (owners.len() / 8, owners.len() % 8);
                     owners.push((r as u32, i as u32));
                     let edges = &mut leaves[leaf];
-                    (edges.ax[k], edges.ay[k], edges.ex[k], edges.ey[k]) = (a.x, a.y, b.x - a.x, b.y - a.y);
+                    (edges.ax[k], edges.ay[k], edges.ex[k], edges.ey[k]) =
+                        (a.x, a.y, b.x - a.x, b.y - a.y);
                     // (The leaf's box, in its parent.)
                     let boxes = &mut level[leaf / 8];
                     let at = leaf % 8;
@@ -1306,7 +1355,11 @@ mod edge_aa {
                 }
                 levels.push(above);
             }
-            Self { leaves, owners, levels }
+            Self {
+                leaves,
+                owners,
+                levels,
+            }
         }
 
         /// Where the ray first meets the outline: (how far along it, the ring, the edge).
@@ -1415,9 +1468,7 @@ mod edge_aa {
         let mut inside = false;
         for i in 0..points.len() {
             let (a, b) = (points[i], points[(i + 1) % points.len()]);
-            if (a.y <= p.y) != (b.y <= p.y)
-                && a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y) > p.x
-            {
+            if (a.y <= p.y) != (b.y <= p.y) && a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y) > p.x {
                 inside = !inside;
             }
         }
@@ -1426,7 +1477,10 @@ mod edge_aa {
 
     /// `color` at `alpha` times its alpha.
     pub fn with_alpha(color: swf::Color, alpha: f32) -> swf::Color {
-        swf::Color { a: (f32::from(color.a) * alpha).round() as u8, ..color }
+        swf::Color {
+            a: (f32::from(color.a) * alpha).round() as u8,
+            ..color
+        }
     }
 
     /// Where an edge is: against the background or above another fill (faded across the
@@ -1505,7 +1559,9 @@ mod edge_aa {
             let from = point(cursor);
             let push = |to: Point, contours: &mut Vec<(Vec<Point>, Vec<Side>)>| {
                 if let Some((points, sides)) = contours.last_mut()
-                    && points.last().is_some_and(|last| (*last - to).square_length() > EPSILON)
+                    && points
+                        .last()
+                        .is_some_and(|last| (*last - to).square_length() > EPSILON)
                 {
                     points.push(to);
                     sides.push(side);
@@ -1553,7 +1609,11 @@ mod edge_aa {
         }
         let area = |pts: &[Point]| -> f32 {
             (0..pts.len())
-                .map(|i| pts[i].to_vector().cross(pts[(i + 1) % pts.len()].to_vector()))
+                .map(|i| {
+                    pts[i]
+                        .to_vector()
+                        .cross(pts[(i + 1) % pts.len()].to_vector())
+                })
                 .sum::<f32>()
         };
         let rings: Vec<Outline> = contours
@@ -1589,7 +1649,14 @@ mod edge_aa {
                 if area.abs() < 0.04 * width * perimeter {
                     return None;
                 }
-                Some(Outline { points, sides, lengths, normals, perimeter, area })
+                Some(Outline {
+                    points,
+                    sides,
+                    lengths,
+                    normals,
+                    perimeter,
+                    area,
+                })
             })
             .collect();
 
@@ -1678,7 +1745,15 @@ mod edge_aa {
         // fill.)
         let outlines: Vec<&[Point]> = rings.iter().map(|ring| ring.points.as_slice()).collect();
         let mut votes = vec![(0.0f32, 0.0f32); rings.len()];
-        vote(&rings, &outlines, fill_rule, &mut votes, &|_| true, width * 0.25, width * 0.25);
+        vote(
+            &rings,
+            &outlines,
+            fill_rule,
+            &mut votes,
+            &|_| true,
+            width * 0.25,
+            width * 0.25,
+        );
         // A ring with a quarter of its length or more the other way crosses itself or another
         // ring of this fill (overlapping loops, a figure eight): it can't be moved as a whole,
         // as those stretches would be left out. Such a fill is drawn as it is, with plain
@@ -1725,7 +1800,15 @@ mod edge_aa {
                     *vote = (0.0, 0.0);
                 }
             }
-            vote(&rings, &outlines, fill_rule, &mut votes, &|r| again[r], width / 30.0, width / 15.0);
+            vote(
+                &rings,
+                &outlines,
+                fill_rule,
+                &mut votes,
+                &|r| again[r],
+                width / 30.0,
+                width / 15.0,
+            );
         }
         if votes.iter().any(tangled) {
             TANGLED.with(|t| t.set(true));
@@ -1736,9 +1819,23 @@ mod edge_aa {
         // beside any edge of either ring is past the band, so neither got a vote and both
         // were given a side by the left's word below, one of them the wrong one (a hairline
         // ring was drawn as a solid line a pixel wide).
-        if votes.iter().any(|&(left, right)| left <= 0.0 && right <= 0.0) {
-            let none: Vec<bool> = votes.iter().map(|&(left, right)| left <= 0.0 && right <= 0.0).collect();
-            vote(&rings, &outlines, fill_rule, &mut votes, &|r| none[r], width / 30.0, width * 0.25);
+        if votes
+            .iter()
+            .any(|&(left, right)| left <= 0.0 && right <= 0.0)
+        {
+            let none: Vec<bool> = votes
+                .iter()
+                .map(|&(left, right)| left <= 0.0 && right <= 0.0)
+                .collect();
+            vote(
+                &rings,
+                &outlines,
+                fill_rule,
+                &mut votes,
+                &|r| none[r],
+                width / 30.0,
+                width * 0.25,
+            );
         }
         // Rings still without votes (too small to test): beside the middle of the longest
         // edge, on both sides, no farther from it than a quarter of the ring's own thickness
@@ -1763,8 +1860,7 @@ mod edge_aa {
                     .unwrap_or(0);
                 let thickness = ring.area.abs() / ring.perimeter.max(EPSILON);
                 let (a, b) = (points[longest], points[(longest + 1) % n]);
-                let beside = ring.normals[longest]
-                    * (width * 0.25).min(thickness * 0.25);
+                let beside = ring.normals[longest] * (width * 0.25).min(thickness * 0.25);
                 [a.lerp(b, 0.5) + beside, a.lerp(b, 0.5) - beside]
             })
             .collect();
@@ -1784,7 +1880,14 @@ mod edge_aa {
             .zip(left_inside)
             .zip(&votes)
             .map(|((ring, left_is_inside), &(left, right))| {
-                let Outline { points, sides, lengths, normals, perimeter, area: original_area } = ring;
+                let Outline {
+                    points,
+                    sides,
+                    lengths,
+                    normals,
+                    perimeter,
+                    area: original_area,
+                } = ring;
                 let n = points.len();
                 let sign = if left_is_inside { -1.0 } else { 1.0 };
                 // (Outwards.)
@@ -1862,7 +1965,11 @@ mod edge_aa {
                     .sum();
                 let all_thin = all_thin || reversed >= 0.5 * perimeter;
                 // In `area`'s sense the fill is on the left of a positive outline.
-                let filled = if left_is_inside { original_area } else { -original_area };
+                let filled = if left_is_inside {
+                    original_area
+                } else {
+                    -original_area
+                };
                 Ring {
                     alpha: vec![1.0; n],
                     knee: vec![1.0; n],
@@ -1885,12 +1992,18 @@ mod edge_aa {
         // The fades' strength where the fill is thin, and sharp tips.
         let mut rings = rings;
         {
-            let mut moved: Vec<Vec<Point>> =
-                rings.iter_mut().map(|ring| std::mem::take(&mut ring.moved)).collect();
-            let mut alphas: Vec<Vec<f32>> =
-                rings.iter_mut().map(|ring| std::mem::take(&mut ring.alpha)).collect();
-            let mut knees: Vec<Vec<f32>> =
-                rings.iter_mut().map(|ring| std::mem::take(&mut ring.knee)).collect();
+            let mut moved: Vec<Vec<Point>> = rings
+                .iter_mut()
+                .map(|ring| std::mem::take(&mut ring.moved))
+                .collect();
+            let mut alphas: Vec<Vec<f32>> = rings
+                .iter_mut()
+                .map(|ring| std::mem::take(&mut ring.alpha))
+                .collect();
+            let mut knees: Vec<Vec<f32>> = rings
+                .iter_mut()
+                .map(|ring| std::mem::take(&mut ring.knee))
+                .collect();
             let mut extras: Vec<Vec<(usize, f32, f32, f32)>> = vec![Vec::new(); rings.len()];
             // What each ray is for: a vertex (and whether it's a tip) or a point along an edge
             // (and whether the vertex at the edge's start, 1, or end, 2, takes its result too).
@@ -2044,7 +2157,8 @@ mod edge_aa {
                 let outlines: Vec<&[Point]> =
                     rings.iter().map(|ring| ring.points.as_slice()).collect();
                 let tree = EdgeTree::new(&outlines);
-                let hits: Vec<Option<(f32, usize, usize)>> = rays.iter().map(|ray| tree.hit(ray)).collect();
+                let hits: Vec<Option<(f32, usize, usize)>> =
+                    rays.iter().map(|ray| tree.hit(ray)).collect();
                 // A hit counts where the fill really ends there: inside it half-way, outside
                 // just past it (overlapping loops have edges inside the fill). That's only
                 // in doubt, and tested, where the tests for a ring's inside didn't all agree,
@@ -2075,7 +2189,8 @@ mod edge_aa {
                     let ends = hit.is_some()
                         && (!doubtful(ray, hit) || {
                             probe += 2;
-                            fill_rule.is_in(windings[probe - 2]) && !fill_rule.is_in(windings[probe - 1])
+                            fill_rule.is_in(windings[probe - 2])
+                                && !fill_rule.is_in(windings[probe - 1])
                         });
                     let (r, target) = &ray_for[k];
                     // (Strength, knee.)
@@ -2140,7 +2255,9 @@ mod edge_aa {
                     let sides: Vec<Option<(f32, usize, usize)>> =
                         across.iter().map(|ray| tree.hit(ray)).collect();
                     for (k, &(r, i, _)) in tips.iter().enumerate() {
-                        if let (Some((left, ..)), Some((right, ..))) = (sides[2 * k], sides[2 * k + 1]) {
+                        if let (Some((left, ..)), Some((right, ..))) =
+                            (sides[2 * k], sides[2 * k + 1])
+                        {
                             let t = (left + right) / (2.0 * width);
                             alphas[r][i] = (2.0 * t / (t + 1.0)).min(1.0);
                         }
@@ -2177,8 +2294,9 @@ mod edge_aa {
         // thin parts, from their average thickness, drew a fine pattern's specks two or three
         // times too heavy: ground runes came out as solid blobs.) Edges under another fill
         // get no fade (the fill above fades over them): only the faded edges count.
-        let thin_outers: Vec<usize> =
-            (0..rings.len()).filter(|&r| rings[r].all_thin && rings[r].filled > 0.0).collect();
+        let thin_outers: Vec<usize> = (0..rings.len())
+            .filter(|&r| rings[r].all_thin && rings[r].filled > 0.0)
+            .collect();
         // The thin outline each ring belongs to (itself, or the one around a thin hole).
         let part_of: Vec<Option<usize>> = rings
             .iter()
@@ -2251,7 +2369,11 @@ mod edge_aa {
             // The fades, from the moved outline (inside) to half a pixel outside: strips over
             // runs of faded segments (each point shared by the segments on both sides).
             let point = |i: usize| {
-                let (strength, knee) = if in_thin { (1.0, 1.0) } else { (ring.alpha[i], ring.knee[i]) };
+                let (strength, knee) = if in_thin {
+                    (1.0, 1.0)
+                } else {
+                    (ring.alpha[i], ring.knee[i])
+                };
                 // Medium: the outer point can go where the fade's outer line is nearly
                 // straight through it (within a fifth of a pixel of the line between its
                 // neighbours), inside a run of faded edges.
@@ -2350,7 +2472,11 @@ mod edge_aa {
     }
 
     /// The fades of a centered fill.
-    pub fn push_fades(mesh: &mut VertexBuffers<Vertex, u32>, centered: &Centered, color: swf::Color) {
+    pub fn push_fades(
+        mesh: &mut VertexBuffers<Vertex, u32>,
+        centered: &Centered,
+        color: swf::Color,
+    ) {
         if color.a == 0 {
             return;
         }
@@ -2362,7 +2488,11 @@ mod edge_aa {
         let mut outers: Vec<u32> = Vec::new();
         for &(start, count, alpha, closed) in &centered.fade_runs {
             let points = &centered.fade_points[start..start + count];
-            let segments = if closed { count } else { count.saturating_sub(1) };
+            let segments = if closed {
+                count
+            } else {
+                count.saturating_sub(1)
+            };
             firsts.clear();
             if points.iter().all(|point| point.3 >= 1.0) {
                 // No knees. Outer points that can be spared (Medium, `SPARE`) are left out,
@@ -2374,11 +2504,19 @@ mod edge_aa {
                 for (k, (inner, outer, strength, knee)) in points.iter().enumerate() {
                     firsts.push(mesh.vertices.len() as u32);
                     let edge = with_alpha(color, alpha * strength);
-                    mesh.vertices.push(Vertex { x: inner.x, y: inner.y, color: edge });
+                    mesh.vertices.push(Vertex {
+                        x: inner.x,
+                        y: inner.y,
+                        color: edge,
+                    });
                     kept = !(kept && *knee >= SPARE && k > 0 && (closed || k + 1 < count));
                     if kept {
                         outers.push(mesh.vertices.len() as u32);
-                        mesh.vertices.push(Vertex { x: outer.x, y: outer.y, color: clear });
+                        mesh.vertices.push(Vertex {
+                            x: outer.x,
+                            y: outer.y,
+                            color: clear,
+                        });
                     } else {
                         outers.push(u32::MAX);
                     }
@@ -2390,8 +2528,9 @@ mod edge_aa {
                     if outers[j] == u32::MAX {
                         mesh.indices.extend_from_slice(&[inner_i, inner_j, last]);
                     } else {
-                        mesh.indices
-                            .extend_from_slice(&[inner_i, inner_j, outers[j], inner_i, outers[j], last]);
+                        mesh.indices.extend_from_slice(&[
+                            inner_i, inner_j, outers[j], inner_i, outers[j], last,
+                        ]);
                         last = outers[j];
                     }
                 }
@@ -2404,13 +2543,25 @@ mod edge_aa {
                     let knee = knee.max(0.0);
                     let middle = outer.lerp(*inner, knee);
                     for (p, a) in [(*inner, 0.0), (middle, full * knee)] {
-                        mesh.vertices.push(Vertex { x: p.x, y: p.y, color: with_alpha(color, a) });
+                        mesh.vertices.push(Vertex {
+                            x: p.x,
+                            y: p.y,
+                            color: with_alpha(color, a),
+                        });
                     }
                 } else {
                     let edge = with_alpha(color, full);
-                    mesh.vertices.push(Vertex { x: inner.x, y: inner.y, color: edge });
+                    mesh.vertices.push(Vertex {
+                        x: inner.x,
+                        y: inner.y,
+                        color: edge,
+                    });
                 }
-                mesh.vertices.push(Vertex { x: outer.x, y: outer.y, color: clear });
+                mesh.vertices.push(Vertex {
+                    x: outer.x,
+                    y: outer.y,
+                    color: clear,
+                });
             }
             for i in 0..segments {
                 let j = (i + 1) % count;
@@ -2464,11 +2615,17 @@ mod edge_aa {
                 .unwrap_or(0);
             let (a, b) = (points[longest], points[(longest + 1) % n]);
             let probe = squash.undo(a.lerp(b, 0.5) + left_normal(a, b) * (width * 0.25));
-            let left_is_inside =
-                lyon::algorithms::hit_test::hit_test_path(&probe, path.iter(), fill_rule, tolerance);
+            let left_is_inside = lyon::algorithms::hit_test::hit_test_path(
+                &probe,
+                path.iter(),
+                fill_rule,
+                tolerance,
+            );
             let outward = if left_is_inside { -width } else { width };
-            let offsets: Vec<Vector> =
-                vertex_normals(&points, true).into_iter().map(|v| v * outward).collect();
+            let offsets: Vec<Vector> = vertex_normals(&points, true)
+                .into_iter()
+                .map(|v| v * outward)
+                .collect();
             push_strip(mesh, &points, &offsets, true, color);
         }
         squash.undo_vertices(mesh, start);
@@ -2516,7 +2673,11 @@ mod edge_aa {
         let hairline = inner <= 0.0;
         type Mesh = VertexBuffers<Vertex, u32>;
         let push = |mesh: &mut Mesh, p: Point, color: swf::Color| -> u32 {
-            mesh.vertices.push(Vertex { x: p.x, y: p.y, color });
+            mesh.vertices.push(Vertex {
+                x: p.x,
+                y: p.y,
+                color,
+            });
             mesh.vertices.len() as u32 - 1
         };
         // A quad of fade between two spokes across it, each from its inner vertex (full alpha)
@@ -2588,7 +2749,10 @@ mod edge_aa {
                 let (left, right) = if hairline {
                     (hubs + k as u32, hubs + k as u32)
                 } else {
-                    (push(mesh, p + across * inner, color), push(mesh, p + across * -inner, color))
+                    (
+                        push(mesh, p + across * inner, color),
+                        push(mesh, p + across * -inner, color),
+                    )
                 };
                 let spokes = [
                     (left, push(mesh, p + across * outer, clear)),
@@ -2651,7 +2815,8 @@ mod edge_aa {
                     if Vector::new(mid.cos(), mid.sin()).dot(forward) < 0.0 {
                         delta -= std::f32::consts::TAU * delta.signum();
                     }
-                    let steps = (delta.abs() / (std::f32::consts::PI / 8.0)).ceil().max(1.0) as usize;
+                    let steps =
+                        (delta.abs() / (std::f32::consts::PI / 8.0)).ceil().max(1.0) as usize;
                     let centre = points[k];
                     let spoke = |mesh: &mut Mesh, t: usize| -> (u32, u32) {
                         let angle = start + delta * t as f32 / steps as f32;
@@ -2662,7 +2827,10 @@ mod edge_aa {
                         } else {
                             push(mesh, centre + d * (inner * reach), color)
                         };
-                        (inner_vertex, push(mesh, centre + d * (outer * reach), clear))
+                        (
+                            inner_vertex,
+                            push(mesh, centre + d * (outer * reach), clear),
+                        )
                     };
                     let mut last = spoke(mesh, 0);
                     for t in 0..steps {

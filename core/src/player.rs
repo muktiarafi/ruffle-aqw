@@ -36,7 +36,9 @@ use crate::display_object::{
 };
 use crate::events::GamepadButton;
 use crate::events::PlayerNotification;
-use crate::events::{ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, MouseButton, PlayerEvent, TouchPhase};
+use crate::events::{
+    ButtonKeyCode, ClipEvent, ClipEventResult, KeyCode, MouseButton, PlayerEvent, TouchPhase,
+};
 use crate::external::{ExternalInterface, ExternalInterfaceProvider, NullFsCommandProvider};
 use crate::external::{FsCommandProvider, Value as ExternalValue};
 use crate::focus_tracker::NavigationDirection;
@@ -2573,8 +2575,7 @@ impl Player {
 
             // AQW build: shapes this frame draws for the first time are tessellated together,
             // in parallel, once the frame's commands are built (see `deferred_shapes`).
-            let deferred_shapes =
-                crate::display_object::graphic::deferred_shapes::Scope::begin();
+            let deferred_shapes = crate::display_object::graphic::deferred_shapes::Scope::begin();
 
             if let Some(program) = program {
                 gc_root
@@ -3066,7 +3067,10 @@ impl Player {
             Self::finish_gc_cycle(&mut self.gc_arena.borrow_mut());
         }
         let freed = self.mutate_with_update_context(|context| context.library.freed_movie_count());
-        (freed - freed_before, started.elapsed().as_secs_f64() * 1000.0)
+        (
+            freed - freed_before,
+            started.elapsed().as_secs_f64() * 1000.0,
+        )
     }
 
     pub fn flush_shared_objects(&mut self) {
@@ -4146,7 +4150,11 @@ pub fn gc_finalize_micros(reset: bool) -> (u64, u64, u64) {
     } else {
         FINALIZE_MICROS[0].load(Relaxed)
     };
-    (longest, FINALIZE_MICROS[1].load(Relaxed), FINALIZE_MICROS[2].load(Relaxed))
+    (
+        longest,
+        FINALIZE_MICROS[1].load(Relaxed),
+        FINALIZE_MICROS[2].load(Relaxed),
+    )
 }
 
 /// AQW build: target seconds per full GC cycle (`RUFFLE_GC_CYCLE_SECONDS`, default 10; 0 = stock
@@ -4195,11 +4203,23 @@ fn aqw_log_press<'gc>(context: &mut UpdateContext<'gc>) {
         let name = object.name().map(|n| n.to_string()).unwrap_or_default();
         let mouse = object
             .as_interactive()
-            .map(|i| if i.mouse_enabled() { "" } else { " [mouseEnabled=false]" })
+            .map(|i| {
+                if i.mouse_enabled() {
+                    ""
+                } else {
+                    " [mouseEnabled=false]"
+                }
+            })
             .unwrap_or("");
         let children = object
             .as_container()
-            .map(|c| if c.raw_container().mouse_children() { "" } else { " [mouseChildren=false]" })
+            .map(|c| {
+                if c.raw_container().mouse_children() {
+                    ""
+                } else {
+                    " [mouseChildren=false]"
+                }
+            })
             .unwrap_or("");
         format!("{class} '{name}'{mouse}{children}")
     }

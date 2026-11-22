@@ -420,7 +420,10 @@ static LIBRARY_GC: LibraryGcCounts = LibraryGcCounts {
 /// AQW build: (tested, revived) so far.
 pub fn library_gc_counts() -> (u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
-    (LIBRARY_GC.tested.load(Relaxed), LIBRARY_GC.revived.load(Relaxed))
+    (
+        LIBRARY_GC.tested.load(Relaxed),
+        LIBRARY_GC.revived.load(Relaxed),
+    )
 }
 
 /// AQW build: one in this many of the loaded libraries, and of their characters, is tested in
@@ -841,13 +844,14 @@ impl<'gc> Library<'gc> {
             }
             let in_use = anchored.contains(addr)
                 || !library.swf.is_dead(fc)
-                || library
-                    .characters
-                    .values()
-                    .any(|c| character_in_use(fc, c));
-            LIBRARY_GC.tested.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                || library.characters.values().any(|c| character_in_use(fc, c));
+            LIBRARY_GC
+                .tested
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if in_use {
-                LIBRARY_GC.revived.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                LIBRARY_GC
+                    .revived
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 library.aqw_gc.testing.set(false);
                 let backoff = (library.aqw_gc.backoff.get() * 2 + 1).min(max_wait());
                 library.aqw_gc.backoff.set(backoff);
@@ -927,7 +931,8 @@ impl<'gc> Library<'gc> {
             // AS3 flag, so it read as AVM1 and was never tested. AQW loads a death ad on every
             // death; under a bot dying every 15 s they piled up (~150 MB/h). Its library holds
             // no characters, only its `Loader`'s domain; a live `LoaderInfo` still anchors it.
-            if SwfMovie::ptr_eq(&movie, &root_movie) || (!movie.is_action_script_3() && movie.is_movie())
+            if SwfMovie::ptr_eq(&movie, &root_movie)
+                || (!movie.is_action_script_3() && movie.is_movie())
             {
                 continue;
             }

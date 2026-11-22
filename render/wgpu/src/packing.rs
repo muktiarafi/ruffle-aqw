@@ -89,7 +89,10 @@ mod tests {
         assert!(page_width <= MAX_WIDTH && page_height <= MAX_HEIGHT);
         for (i, &(x, y)) in positions.iter().enumerate() {
             let (w, h) = sizes[i];
-            assert!(x + w <= page_width && y + h <= page_height, "item {i} outside the page");
+            assert!(
+                x + w <= page_width && y + h <= page_height,
+                "item {i} outside the page"
+            );
             for (j, &(x2, y2)) in positions.iter().enumerate().skip(i + 1) {
                 let (w2, h2) = sizes[j];
                 let overlap = x < x2 + w2 && x2 < x + w && y < y2 + h2 && y2 < y + h;

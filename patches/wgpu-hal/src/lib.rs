@@ -301,7 +301,13 @@ pub(crate) fn aqw_pool_limit() -> Option<usize> {
     static LIMIT: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
         let value = std::env::var("RUFFLE_LEAN_POOLS").ok()?;
-        Some(value.parse().ok().filter(|limit| *limit >= 16).unwrap_or(64))
+        Some(
+            value
+                .parse()
+                .ok()
+                .filter(|limit| *limit >= 16)
+                .unwrap_or(64),
+        )
     })
 }
 
@@ -369,7 +375,10 @@ pub(crate) fn aqw_kind_sizes(base: AllocationSizes, kind: u8) -> AllocationSizes
                 .filter(|mb| *mb != 0)
             {
                 let block = (mb * MB).clamp(4 * MB, 256 * MB);
-                log::info!("AQW build: pooled layers use {} MB GPU memory blocks", block / MB);
+                log::info!(
+                    "AQW build: pooled layers use {} MB GPU memory blocks",
+                    block / MB
+                );
                 return AllocationSizes {
                     min_device_memblock_size: block,
                     max_device_memblock_size: block,
@@ -387,7 +396,10 @@ pub(crate) fn aqw_kind_sizes(base: AllocationSizes, kind: u8) -> AllocationSizes
         return base;
     }
     let block = (block_mb * MB).clamp(4 * MB, 256 * MB);
-    log::info!("AQW build: cacheAsBitmap pictures use {} MB GPU memory blocks", block / MB);
+    log::info!(
+        "AQW build: cacheAsBitmap pictures use {} MB GPU memory blocks",
+        block / MB
+    );
     AllocationSizes {
         min_device_memblock_size: block,
         max_device_memblock_size: block,

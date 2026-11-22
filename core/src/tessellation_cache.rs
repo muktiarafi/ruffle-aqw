@@ -188,7 +188,12 @@ impl Measure {
         let squash = ((sum + spread) / (sum - spread).max(f32::EPSILON)).sqrt();
         let detail = ruffle / scale;
         let stretch = if squash > 1.3 {
-            [(a * a + b * b) / det, (a * c + b * d) / det, (c * c + d * d) / det, detail]
+            [
+                (a * a + b * b) / det,
+                (a * c + b * d) / det,
+                (c * c + d * d) / det,
+                detail,
+            ]
         } else {
             [1.0, 0.0, 1.0, detail]
         };
@@ -257,7 +262,8 @@ fn min_size() -> f32 {
 }
 
 /// AQW build: see `set_min_size` (the f32's bits).
-static MIN_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(32.0f32.to_bits());
+static MIN_SIZE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(32.0f32.to_bits());
 
 /// AQW build: sets the size detailed shapes are tessellated for at least (see
 /// `at_least_min_size`), before the first one is. The desktop player keeps the old 8 px on a

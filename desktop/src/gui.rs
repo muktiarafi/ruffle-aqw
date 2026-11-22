@@ -3,8 +3,8 @@ mod controller;
 pub mod dialogs;
 mod locale;
 mod menu_bar;
-mod mugetsu_menu;
 mod movie;
+mod mugetsu_menu;
 mod picker;
 mod prompt;
 mod theme;
@@ -158,9 +158,9 @@ impl RuffleGui {
                 Some(Action::SkipVersion(version)) => crate::mugetsu::skip_update(&version),
                 Some(Action::StopUpdateReminders) => crate::mugetsu::set_update_reminders(false),
                 Some(Action::Restart) => {
-                    let _ = self
-                        .event_loop
-                        .send_event(RuffleEvent::MugetsuSetting(crate::mugetsu::Setting::Restart));
+                    let _ = self.event_loop.send_event(RuffleEvent::MugetsuSetting(
+                        crate::mugetsu::Setting::Restart,
+                    ));
                 }
                 Some(Action::TurnOnPerformance(level)) => {
                     let _ = self.event_loop.send_event(RuffleEvent::MugetsuSetting(
@@ -187,7 +187,8 @@ impl RuffleGui {
     /// `Prompt::interpolation_restart`), or takes the offer back (`wanted` false:
     /// interpolation was turned off again).
     pub fn offer_interpolation_restart(&mut self, wanted: bool) {
-        self.prompts.retain(|prompt| !prompt.is_interpolation_restart());
+        self.prompts
+            .retain(|prompt| !prompt.is_interpolation_restart());
         if wanted {
             self.prompts.push(Prompt::interpolation_restart());
         }

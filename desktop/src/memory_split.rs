@@ -46,7 +46,9 @@ fn allocator_json() -> Option<String> {
         if text.is_null() {
             return None;
         }
-        let json = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
+        let json = std::ffi::CStr::from_ptr(text)
+            .to_string_lossy()
+            .into_owned();
         libmimalloc_sys::mi_free(text.cast());
         Some(json)
     }
@@ -132,7 +134,8 @@ pub fn report() -> String {
 pub fn collect_if_flagged(process_commit: impl Fn() -> u64) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let on = *ON.get_or_init(|| {
-        crate::mugetsu::exe_flag("heap-collect") || std::env::var_os("RUFFLE_HEAP_COLLECT").is_some()
+        crate::mugetsu::exe_flag("heap-collect")
+            || std::env::var_os("RUFFLE_HEAP_COLLECT").is_some()
     });
     if !on {
         return;

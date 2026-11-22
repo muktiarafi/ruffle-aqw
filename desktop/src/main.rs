@@ -32,9 +32,9 @@ use app::App;
 use clap::CommandFactory;
 use clap::Parser;
 use cli::Opt;
+pub use mugetsu::window_title;
 use ruffle_core::StaticCallstack;
 use std::cell::RefCell;
-pub use mugetsu::window_title;
 use std::env;
 use std::fs::File;
 use std::panic::PanicHookInfo;
@@ -207,7 +207,9 @@ fn mugetsu_args() -> Vec<std::ffi::OsString> {
     const AQW_LOADER_URL: &str = "https://game.aq.com/game/gamefiles/Loader3.swf?ver=a";
 
     let mut args: Vec<std::ffi::OsString> = env::args_os().collect();
-    let is = |arg: &std::ffi::OsString, flag: &str| arg.to_str().is_some_and(|a| a.eq_ignore_ascii_case(flag));
+    let is = |arg: &std::ffi::OsString, flag: &str| {
+        arg.to_str().is_some_and(|a| a.eq_ignore_ascii_case(flag))
+    };
     if args.iter().any(|a| is(a, "--no-obs")) {
         args.retain(|a| !is(a, "--no-obs"));
         // SAFETY: this runs first thing in `main`, before any other thread exists.
@@ -271,7 +273,7 @@ fn mugetsu_args() -> Vec<std::ffi::OsString> {
     // AQW build: `layer-cache-check` file next to the exe = compare sampled cached layers with
     // fresh renders (see `ruffle_render_wgpu::layer_cache`).
     ruffle_render_wgpu::layer_cache::set_check_enabled(mugetsu::exe_flag("layer-cache-check"));
-    let given =|flag: &str| {
+    let given = |flag: &str| {
         args.iter().skip(1).any(|a| {
             a.to_str()
                 .is_some_and(|a| a == flag || a.starts_with(&format!("{flag}=")))
@@ -284,9 +286,10 @@ fn mugetsu_args() -> Vec<std::ffi::OsString> {
     // (see `GuiController::new`). The older rules stay for what they log and say in the
     // title: Intel/Qualcomm graphics (see `mugetsu::intel_graphics`), and a PC where the
     // Vulkan driver crashed while starting (see `mugetsu::vulkan_crashed_before`).
-    let low_power = args.windows(2).any(|pair| {
-        (is(&pair[0], "--power") || is(&pair[0], "-p")) && is(&pair[1], "low")
-    }) || args.iter().any(|a| is(a, "--power=low"));
+    let low_power = args
+        .windows(2)
+        .any(|pair| (is(&pair[0], "--power") || is(&pair[0], "-p")) && is(&pair[1], "low"))
+        || args.iter().any(|a| is(a, "--power=low"));
     mugetsu::apply_drawing_switches();
     let graphics = if given("--graphics") || given("-g") {
         "vulkan" // unused: the given option wins

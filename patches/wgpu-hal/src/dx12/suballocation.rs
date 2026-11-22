@@ -43,10 +43,7 @@ pub(crate) struct Allocation {
 impl Allocation {
     pub fn placed(inner: gpu_allocator::d3d12::Allocation, ty: AllocationType) -> Self {
         Self {
-            inner: AllocationInner::Placed {
-                inner,
-                kind: 0,
-            },
+            inner: AllocationInner::Placed { inner, kind: 0 },
             ty,
         }
     }

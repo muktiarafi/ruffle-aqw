@@ -345,7 +345,9 @@ pub fn get_perspective_projection<'gc>(
     // copying each layer's filters, color transform and blend mode.
     let display_object = get_display_object(this);
     if display_object.base().perspective_projection().is_none()
-        && display_object.as_movie_clip().is_some_and(|clip| clip.is_root())
+        && display_object
+            .as_movie_clip()
+            .is_some_and(|clip| clip.is_root())
     {
         display_object.set_perspective_projection(None);
     }

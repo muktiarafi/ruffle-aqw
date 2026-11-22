@@ -7,8 +7,8 @@
 use crate::gui::context_menu::{ACCENT, EDGE, MUTED, PANEL, ROW_HOVER, TEXT, TRACK, panel_style};
 use crate::mugetsu::{Graphics, Notice};
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Label, Layout, Margin, Modal,
-    Modifiers, Response, RichText, Sense, Shadow, Stroke, Ui, vec2,
+    Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Label, Layout, Margin, Modal, Modifiers,
+    Response, RichText, Sense, Shadow, Stroke, Ui, vec2,
 };
 
 const WIDTH: f32 = 330.0;
@@ -204,7 +204,11 @@ impl Prompt {
     /// What the answer `picked` does, if anything.
     pub fn into_action(self, picked: Picked) -> Option<Action> {
         match picked {
-            Picked::Button(i) => self.buttons.into_iter().nth(i).and_then(|(_, action)| action),
+            Picked::Button(i) => self
+                .buttons
+                .into_iter()
+                .nth(i)
+                .and_then(|(_, action)| action),
             Picked::Link(i) => self.links.into_iter().nth(i).map(|(_, action)| action),
             Picked::Dismissed => None,
         }
@@ -287,12 +291,23 @@ impl Prompt {
 /// A rounded button in the panel's style, at least 96 points wide.
 fn button(ui: &mut Ui, z: f32, label: &str, fill: Color32, hover: Color32) -> Response {
     let font = FontId::proportional(14.0 * z);
-    let text_width = ui.painter().layout_no_wrap(label.to_string(), font.clone(), TEXT).size().x;
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font.clone(), TEXT)
+        .size()
+        .x;
     let size = vec2((text_width + 28.0 * z).max(96.0 * z), 32.0 * z);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.hovered() { hover } else { fill };
-    ui.painter().rect_filled(rect, CornerRadius::same((10.0 * z) as u8), fill);
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, Color32::WHITE);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same((10.0 * z) as u8), fill);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        font,
+        Color32::WHITE,
+    );
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -302,10 +317,13 @@ fn button(ui: &mut Ui, z: f32, label: &str, fill: Color32, hover: Color32) -> Re
 /// Small gray text that brightens when hovered, for the less common choices.
 fn link(ui: &mut Ui, z: f32, label: &str) -> Response {
     let font = FontId::proportional(12.0 * z);
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font.clone(), MUTED);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font.clone(), MUTED);
     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
     let color = if response.hovered() { TEXT } else { MUTED };
-    ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, label, font, color);
+    ui.painter()
+        .text(rect.left_center(), Align2::LEFT_CENTER, label, font, color);
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -406,7 +424,11 @@ mod tests {
             pressed,
             modifiers: Modifiers::NONE,
         };
-        vec![vec![Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]]
+        vec![
+            vec![Event::PointerMoved(pos)],
+            vec![button(true)],
+            vec![button(false)],
+        ]
     }
 
     #[test]
@@ -419,8 +441,14 @@ mod tests {
             for prompt in prompts() {
                 let (_, rect) = settled(&prompt, size);
                 let title = &prompt.title;
-                assert!(window.contains_rect(rect), "{title:?} in {size:?}: {rect:?}");
-                assert!(rect.height() < 0.9 * size.1, "{title:?} in {size:?}: {rect:?}");
+                assert!(
+                    window.contains_rect(rect),
+                    "{title:?} in {size:?}: {rect:?}"
+                );
+                assert!(
+                    rect.height() < 0.9 * size.1,
+                    "{title:?} in {size:?}: {rect:?}"
+                );
                 assert!(
                     rect.width() <= (WIDTH + 2.0 * 16.0) * z + 4.0,
                     "{title:?} in {size:?}: {rect:?}"
@@ -453,7 +481,10 @@ mod tests {
     fn the_main_button_answers_and_keys_still_reach_the_game() {
         let z = (WINDOWS[0].1 / 1000.0).clamp(0.6, 1.0);
         // (Without links below the buttons, so the main button is at the bottom right.)
-        for prompt in prompts().into_iter().filter(|prompt| prompt.links.is_empty()) {
+        for prompt in prompts()
+            .into_iter()
+            .filter(|prompt| prompt.links.is_empty())
+        {
             let (ctx, rect) = settled(&prompt, WINDOWS[0]);
             // Why notices take no keys: the game still gets them while a prompt is shown.
             assert!(!ctx.egui_wants_keyboard_input());

@@ -214,7 +214,11 @@ impl PerfStats {
                     "video memory {} / {} MB budget (transient textures apart: {}); ",
                     usage >> 20,
                     budget >> 20,
-                    if ruffle_render_wgpu::transient_textures_enabled() { "on" } else { "off" }
+                    if ruffle_render_wgpu::transient_textures_enabled() {
+                        "on"
+                    } else {
+                        "off"
+                    }
                 )
             })
             .unwrap_or_default();
@@ -269,7 +273,8 @@ impl PerfStats {
         // 30 (a short pause each), to find what grows in long sessions.
         static CENSUS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *CENSUS.get_or_init(|| crate::mugetsu::exe_flag("heap-census"))
-            && (self.windows_logged == 25 || self.windows_logged % 360 == 1 && self.windows_logged > 1)
+            && (self.windows_logged == 25
+                || self.windows_logged % 360 == 1 && self.windows_logged > 1)
         {
             player.log_heap_census(40);
         }
@@ -279,10 +284,10 @@ impl PerfStats {
     fn maybe_log(&mut self, now: Instant) -> bool {
         use ruffle_render_wgpu::perf_counters::timers;
         let start = *self.window_start.get_or_insert(now);
-        let timers_at = *self
-            .timers_at
-            .get_or_insert_with(timers::snapshot);
-        let walk_at = *self.walk_at.get_or_insert_with(ruffle_core::render_walk_micros);
+        let timers_at = *self.timers_at.get_or_insert_with(timers::snapshot);
+        let walk_at = *self
+            .walk_at
+            .get_or_insert_with(ruffle_core::render_walk_micros);
         let replay_at = *self
             .replay_at
             .get_or_insert_with(ruffle_core::interpolation_replay::stats);
@@ -447,10 +452,17 @@ impl std::fmt::Display for Freed {
             self.after.0,
             self.shapes,
             shapes + textures + heap,
-            if self.heap_waited { "" } else { "; the heap's pages go back in the background" },
+            if self.heap_waited {
+                ""
+            } else {
+                "; the heap's pages go back in the background"
+            },
         )?;
         if let Some((libraries, ms)) = self.libraries {
-            write!(f, "; before that, {libraries} loaded SWFs nothing used any more freed in {ms:.0} ms")?;
+            write!(
+                f,
+                "; before that, {libraries} loaded SWFs nothing used any more freed in {ms:.0} ms"
+            )?;
         }
         Ok(())
     }
@@ -666,7 +678,11 @@ fn memory_watch(player: &mut ruffle_core::Player) {
         ruffle_render_wgpu::set_memory_pressure(true);
         let was = std::mem::replace(&mut watch.pressure, true);
         watch.low_since = None;
-        if !was || watch.last_log.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+        if !was
+            || watch
+                .last_log
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(60))
+        {
             watch.last_log = Some(Instant::now());
             let after = crate::mugetsu::video_memory().map_or(0, |(_, usage)| usage);
             tracing::info!(
@@ -780,7 +796,11 @@ fn timer_parts(before: &[u64; ruffle_render_wgpu::perf_counters::timers::LEN]) -
             .join(", ")
     };
     let (here, meanwhile) = (list(false), list(true));
-    let here = if here.is_empty() { "none of the timed work".to_string() } else { here };
+    let here = if here.is_empty() {
+        "none of the timed work".to_string()
+    } else {
+        here
+    };
     if meanwhile.is_empty() {
         here
     } else {
@@ -825,8 +845,11 @@ impl MainWindow {
                             Some(interval) => {
                                 let due = self.picture_due + interval;
                                 if started + Duration::from_micros(300) >= due {
-                                    self.picture_due =
-                                        if started < due + interval { due } else { started };
+                                    self.picture_due = if started < due + interval {
+                                        due
+                                    } else {
+                                        started
+                                    };
                                     true
                                 } else {
                                     false
@@ -838,7 +861,11 @@ impl MainWindow {
                         let due = self.picture_due + interval;
                         if started + self.refresh_interval / 2 >= due {
                             // Keep the rhythm, unless it fell more than a picture behind.
-                            self.picture_due = if started < due + interval { due } else { started };
+                            self.picture_due = if started < due + interval {
+                                due
+                            } else {
+                                started
+                            };
                             true
                         } else {
                             false
@@ -880,12 +907,12 @@ impl MainWindow {
                     let menus_want = self.gui.needs_render() && self.gui.wants_redraws();
                     // (TEST SWITCH: `RUFFLE_TEST_MENU_FRAMES_FREE=1`: as it was, for comparisons.)
                     static FREE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    let free = *FREE.get_or_init(|| {
-                        std::env::var_os("RUFFLE_TEST_MENU_FRAMES_FREE").is_some()
-                    });
+                    let free = *FREE
+                        .get_or_init(|| std::env::var_os("RUFFLE_TEST_MENU_FRAMES_FREE").is_some());
                     let menus_due = match self.uncapped_interval {
                         Some(interval) if !free => {
-                            self.last_redraw.elapsed() >= interval.min(Duration::from_micros(16_600))
+                            self.last_redraw.elapsed()
+                                >= interval.min(Duration::from_micros(16_600))
                         }
                         _ => true,
                     };
@@ -1138,7 +1165,8 @@ impl MainWindow {
                             y,
                             button: RuffleMouseButton::Right,
                         };
-                        self.gui.show_context_menu(context_menu, settings, close_event);
+                        self.gui
+                            .show_context_menu(context_menu, settings, close_event);
                     }
                 }
                 self.check_redraw();
@@ -1256,7 +1284,10 @@ impl MainWindow {
             Setting::Interpolation(on) => {
                 ruffle_core::frame_interpolation::set_enabled(on);
                 mugetsu::save_interpolation(on);
-                tracing::info!("Frame interpolation turned {}", if on { "on" } else { "off" });
+                tracing::info!(
+                    "Frame interpolation turned {}",
+                    if on { "on" } else { "off" }
+                );
                 // The render thread comes with interpolation, but only from the start.
                 self.gui
                     .offer_interpolation_restart(on && mugetsu::render_thread_needs_restart());
@@ -1264,7 +1295,9 @@ impl MainWindow {
                 crate::windows::sync_menu_checks(self.gui.window());
             }
             Setting::Graphics(choice) => {
-                if (cfg!(windows) || cfg!(target_os = "linux")) && choice != mugetsu::saved_graphics() {
+                if (cfg!(windows) || cfg!(target_os = "linux"))
+                    && choice != mugetsu::saved_graphics()
+                {
                     self.gui.ask_graphics_restart(choice);
                 }
             }
@@ -1338,7 +1371,10 @@ impl MainWindow {
             // (Set as picked, without a question first: the menu's hint says what it is for.)
             Setting::Uncapped(on) => {
                 mugetsu::set_uncapped(on);
-                tracing::info!("Frame pacing set to {}", if on { "uncapped" } else { "v-sync" });
+                tracing::info!(
+                    "Frame pacing set to {}",
+                    if on { "uncapped" } else { "v-sync" }
+                );
             }
             Setting::FpsLimit(limit) => {
                 mugetsu::set_fps_limit(limit);
@@ -1528,7 +1564,8 @@ impl MainWindow {
                             y: 0.0,
                             button: ruffle_core::events::MouseButton::Right,
                         };
-                        self.gui.show_context_menu(Vec::new(), settings, close_event);
+                        self.gui
+                            .show_context_menu(Vec::new(), settings, close_event);
                         self.gui.window().request_redraw();
                     }
                     WindowAction::OfferRestart => self.gui.offer_interpolation_restart(true),
@@ -1747,7 +1784,12 @@ impl MainWindow {
             }
             (refresh_hz / per_second).ceil().clamp(1.0, 16.0) as u32
         };
-        let needed = divisor_for(self.draw_cost_ms, self.between_cost_ms, thread_cost_ms, None);
+        let needed = divisor_for(
+            self.draw_cost_ms,
+            self.between_cost_ms,
+            thread_cost_ms,
+            None,
+        );
         let fitting = divisor_for(
             self.draw_cost_ms,
             self.between_cost_ms,
@@ -1824,8 +1866,8 @@ impl MainWindow {
             // undone, the pictures go out as fast as they get through, as before, and this
             // is left alone for a while (15 s, twice as long each time it fails again, up to
             // 10 minutes).
-            self.limit_quiet = (self.limit_quiet * 2)
-                .clamp(Duration::from_secs(15), Duration::from_secs(600));
+            self.limit_quiet =
+                (self.limit_quiet * 2).clamp(Duration::from_secs(15), Duration::from_secs(600));
             self.limit_quiet_until = Some(now + self.limit_quiet);
             tracing::info!(
                 target: "ruffle_aqw_perf",
@@ -1844,7 +1886,9 @@ impl MainWindow {
         } else if fell_behind {
             let gap_ms = self.picture_gap_ms;
             let before = self.draw_divisor;
-            let fits = (refresh_hz * gap_ms / PIPELINE_BUDGET_MS).ceil().clamp(1.0, 16.0) as u32;
+            let fits = (refresh_hz * gap_ms / PIPELINE_BUDGET_MS)
+                .ceil()
+                .clamp(1.0, 16.0) as u32;
             let target = fits.max(before + 1).max(needed).min(16);
             // What that pace gives (one picture per game frame once it would be fewer than
             // 1.5), against what gets through now (see `LIMIT_LOSS`).

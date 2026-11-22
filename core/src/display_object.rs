@@ -35,11 +35,11 @@ mod edit_text;
 pub(crate) mod graphic;
 mod interactive;
 pub mod interp;
-pub mod replay;
 mod loader_display;
 mod morph_shape;
 mod movie_clip;
 pub mod pick_notes;
+pub mod replay;
 mod stage;
 mod text;
 mod text_line;
@@ -1111,7 +1111,10 @@ pub fn render_base<'gc>(
                 recorder.catch_up(this);
             }
             // AQW build: frame interpolation (does nothing unless it's on).
-            from = this.base().interp.blend(&mut transform, this.base().ratio.get());
+            from = this
+                .base()
+                .interp
+                .blend(&mut transform, this.base().ratio.get());
         }
         if lean
             && let Some(real) = &real
@@ -1792,7 +1795,11 @@ pub trait TDisplayObject<'gc>:
             let mark = &object.base().settled;
             // A settled object only has settled descendants, so an unsettled one means all
             // its ancestors are unsettled already.
-            if !(if kept { mark.is_marked() } else { mark.is_set() }) {
+            if !(if kept {
+                mark.is_marked()
+            } else {
+                mark.is_set()
+            }) {
                 break;
             }
             mark.clear();
@@ -3893,7 +3900,11 @@ pub mod settle {
                 stats.violations,
             );
             STATS.with(|s| {
-                s.set(Stats { violations: stats.violations, work: stats.work, ..Stats::default() })
+                s.set(Stats {
+                    violations: stats.violations,
+                    work: stats.work,
+                    ..Stats::default()
+                })
             });
         }
     }
@@ -3963,7 +3974,9 @@ fn aqw_log_oversize_parts<'gc>(
     }
     let own = *matrix * object.self_bounds(BoundsMode::Engine);
     let total = object.render_bounds_with_transform(matrix, true, view_matrix);
-    let huge = |r: &Rectangle<Twips>| r.is_valid() && (r.width().to_pixels() > 20000.0 || r.height().to_pixels() > 20000.0);
+    let huge = |r: &Rectangle<Twips>| {
+        r.is_valid() && (r.width().to_pixels() > 20000.0 || r.height().to_pixels() > 20000.0)
+    };
     if !huge(&total) {
         return;
     }
@@ -3976,10 +3989,19 @@ fn aqw_log_oversize_parts<'gc>(
         "  {}{:?} [{class}] {:?}: own {:?} total {:?}; matrix a {} b {} c {} d {} tx {} ty {}; filters {:?}; scroll_rect {:?}",
         "  ".repeat(depth),
         object.name(),
-        format!("{object:?}").split('(').next().unwrap_or_default().to_string(),
+        format!("{object:?}")
+            .split('(')
+            .next()
+            .unwrap_or_default()
+            .to_string(),
         own,
         total,
-        m.a, m.b, m.c, m.d, m.tx.to_pixels(), m.ty.to_pixels(),
+        m.a,
+        m.b,
+        m.c,
+        m.d,
+        m.tx.to_pixels(),
+        m.ty.to_pixels(),
         object.filters(),
         object.scroll_rect(),
     );
@@ -4100,8 +4122,9 @@ fn stabilize_cache_bounds(
     }
     let rel_x = (bounds.x_min - matrix.tx).get();
     let rel_y = (bounds.y_min - matrix.ty).get();
-    let (phase_x, phase_y) =
-        *cache.aqw_phase.get_or_insert((rel_x.rem_euclid(20), rel_y.rem_euclid(20)));
+    let (phase_x, phase_y) = *cache
+        .aqw_phase
+        .get_or_insert((rel_x.rem_euclid(20), rel_y.rem_euclid(20)));
     // Largest value <= rel that is congruent to the phase (mod one pixel).
     let snap = |rel: i32, phase: i32| rel - (rel - phase).rem_euclid(20);
     Rectangle {

@@ -212,8 +212,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
                         .queue_family_index(self.device.family_index)
                         .flags(vk::CommandPoolCreateFlags::TRANSIENT);
                     // (If no new pool can be made, the old one is reset and kept.)
-                    if let Ok(pool) =
-                        unsafe { self.device.raw.create_command_pool(&vk_info, None) }
+                    if let Ok(pool) = unsafe { self.device.raw.create_command_pool(&vk_info, None) }
                     {
                         unsafe { self.device.raw.destroy_command_pool(self.raw, None) };
                         let freed = self.free.len();
@@ -239,8 +238,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 } else if let Some(done) = done {
                     // What was suspected of the device lost in the tests: said in the log,
                     // and the pool is reset and kept as it always was.
-                    let earlier = crate::AQW_EARLY_RESETS
-                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    let earlier =
+                        crate::AQW_EARLY_RESETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     log::error!(
                         "AQW: a command pool is reset while submission {submitted} is not finished (the GPU has finished {done}); kept, not replaced"
                     );

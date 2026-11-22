@@ -1,13 +1,13 @@
-use crate::display_object::graphic::deferred_shapes;
-use crate::tessellation_cache::{MadeFor, Measure, TessellationCache};
 use crate::avm1::Object as Avm1Object;
 use crate::avm2::StageObject as Avm2StageObject;
 use crate::context::{RenderContext, UpdateContext};
+use crate::display_object::graphic::deferred_shapes;
 use crate::display_object::interp::TweenRatio;
 use crate::display_object::{BoundsMode, DisplayObjectBase};
 use crate::library::MovieLibrarySource;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
+use crate::tessellation_cache::{MadeFor, Measure, TessellationCache};
 use crate::vminterface::Instantiator;
 use core::fmt;
 use gc_arena::barrier::unlock;
@@ -185,9 +185,7 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
         };
         let shape_handle = match blended {
             Some(handle) => handle,
-            None if shared.heavy() => {
-                shared.get_heavy_shape(context, &self.0.warming, real, scale)
-            }
+            None if shared.heavy() => shared.get_heavy_shape(context, &self.0.warming, real, scale),
             None => shared.get_shape(context, real, scale),
         };
         context
@@ -402,9 +400,7 @@ impl<'gc> MorphShapeShared<'gc> {
             .iter()
             .enumerate()
             .filter(|(_, (made_for, _))| made_for.fits(scale))
-            .min_by(|(_, (a, _)), (_, (b, _))| {
-                a.deviation(scale).total_cmp(&b.deviation(scale))
-            })
+            .min_by(|(_, (a, _)), (_, (b, _))| a.deviation(scale).total_cmp(&b.deviation(scale)))
             .map(|(index, _)| index)
         {
             let entry = frame.shape_handles.remove(index);
@@ -414,10 +410,7 @@ impl<'gc> MorphShapeShared<'gc> {
         }
         let waited = context.renderer.waited_micros();
         let started = Instant::now();
-        let library = context
-            .library
-            .library_for_movie(self.movie)
-            .unwrap();
+        let library = context.library.library_for_movie(self.movie).unwrap();
         let handle = context.renderer.register_shape_stretched(
             (&*frame.shape).into(),
             &MovieLibrarySource { library },
@@ -474,7 +467,10 @@ impl<'gc> MorphShapeShared<'gc> {
     ) -> ShapeHandle {
         let (shape, cache) = {
             let mut frame = self.get_frame(ratio);
-            let cache = frame.cache.get_or_insert_with(TessellationCache::new_shared).clone();
+            let cache = frame
+                .cache
+                .get_or_insert_with(TessellationCache::new_shared)
+                .clone();
             (frame.shape.clone(), cache)
         };
         let found = cache.borrow_mut().find_near_and_touch(&mut scale);
@@ -495,10 +491,7 @@ impl<'gc> MorphShapeShared<'gc> {
                     let (movie, shape) = (self.movie, shape.clone());
                     deferred_shapes::queue(movie, shape, scale, cache.clone(), false)
                 } else {
-                    let library = context
-                        .library
-                        .library_for_movie(self.movie)
-                        .unwrap();
+                    let library = context.library.library_for_movie(self.movie).unwrap();
                     context.renderer.register_shape_stretched(
                         (&*shape).into(),
                         &MovieLibrarySource { library },
@@ -523,18 +516,27 @@ impl<'gc> MorphShapeShared<'gc> {
             return handle;
         }
         // The newest of the frames it asked for before that is done by now.
-        let done = warming.pending.iter().enumerate().rev().find_map(|(index, entry)| {
-            let mut measure = entry.1;
-            let found = entry.0.borrow_mut().find_near_and_touch(&mut measure);
-            found
-                .filter(|handle| !deferred_shapes::is_placeholder(handle))
-                .map(|handle| (index, handle))
-        });
+        let done = warming
+            .pending
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, entry)| {
+                let mut measure = entry.1;
+                let found = entry.0.borrow_mut().find_near_and_touch(&mut measure);
+                found
+                    .filter(|handle| !deferred_shapes::is_placeholder(handle))
+                    .map(|handle| (index, handle))
+            });
         if let Some((index, done)) = done {
             warming.last = Some(done);
             warming.pending.drain(..=index);
         }
-        if !warming.pending.iter().any(|(pending, _)| Rc::ptr_eq(pending, &cache)) {
+        if !warming
+            .pending
+            .iter()
+            .any(|(pending, _)| Rc::ptr_eq(pending, &cache))
+        {
             if warming.pending.len() >= WARMING_KEPT {
                 warming.pending.remove(0);
             }
@@ -590,10 +592,7 @@ impl<'gc> MorphShapeShared<'gc> {
         let waited = context.renderer.waited_micros();
         let started = Instant::now();
         let frame = self.build_morph_frame(ratio);
-        let library = context
-            .library
-            .library_for_movie(self.movie)
-            .unwrap();
+        let library = context.library.library_for_movie(self.movie).unwrap();
         let handle = context.renderer.register_shape_stretched(
             (&*frame.shape).into(),
             &MovieLibrarySource { library },
@@ -1174,8 +1173,7 @@ mod test {
                 start: detailed(2.0),
                 end: detailed(60.0),
             };
-            let shared =
-                MorphShapeShared::from_swf_tag(&detailed_tag, movie);
+            let shared = MorphShapeShared::from_swf_tag(&detailed_tag, movie);
             assert_eq!(shared.travel_px(), 58.0);
             assert_eq!(shared.travel_px_if_simple(), 0.0);
             // A tween that only changes colour doesn't move.

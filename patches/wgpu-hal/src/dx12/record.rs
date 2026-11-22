@@ -56,8 +56,16 @@ pub(super) enum Op {
         src: ManuallyDrop<Direct3D12::D3D12_TEXTURE_COPY_LOCATION>,
         src_box: Option<Direct3D12::D3D12_BOX>,
     },
-    BeginQuery(Direct3D12::ID3D12QueryHeap, Direct3D12::D3D12_QUERY_TYPE, u32),
-    EndQuery(Direct3D12::ID3D12QueryHeap, Direct3D12::D3D12_QUERY_TYPE, u32),
+    BeginQuery(
+        Direct3D12::ID3D12QueryHeap,
+        Direct3D12::D3D12_QUERY_TYPE,
+        u32,
+    ),
+    EndQuery(
+        Direct3D12::ID3D12QueryHeap,
+        Direct3D12::D3D12_QUERY_TYPE,
+        u32,
+    ),
     ResolveQueryData {
         heap: Direct3D12::ID3D12QueryHeap,
         ty: Direct3D12::D3D12_QUERY_TYPE,
@@ -152,16 +160,29 @@ impl Recorder {
         unsafe { (*self.ops.get()).push(op) }
     }
 
-    pub(super) unsafe fn BeginEvent(&self, _metadata: u32, data: Option<*const ffi::c_void>, size: u32) {
+    pub(super) unsafe fn BeginEvent(
+        &self,
+        _metadata: u32,
+        data: Option<*const ffi::c_void>,
+        size: u32,
+    ) {
         self.push(Op::BeginEvent(marker_bytes(data, size)));
     }
     pub(super) unsafe fn EndEvent(&self) {
         self.push(Op::EndEvent);
     }
-    pub(super) unsafe fn SetMarker(&self, _metadata: u32, data: Option<*const ffi::c_void>, size: u32) {
+    pub(super) unsafe fn SetMarker(
+        &self,
+        _metadata: u32,
+        data: Option<*const ffi::c_void>,
+        size: u32,
+    ) {
         self.push(Op::SetMarker(marker_bytes(data, size)));
     }
-    pub(super) unsafe fn SetDescriptorHeaps(&self, heaps: &[Option<Direct3D12::ID3D12DescriptorHeap>]) {
+    pub(super) unsafe fn SetDescriptorHeaps(
+        &self,
+        heaps: &[Option<Direct3D12::ID3D12DescriptorHeap>],
+    ) {
         self.push(Op::SetDescriptorHeaps(heaps.to_vec()));
     }
     pub(super) unsafe fn IASetVertexBuffers(
@@ -314,7 +335,13 @@ impl Recorder {
         stencil: u8,
         rects: Option<&[Foundation::RECT]>,
     ) {
-        self.push(Op::ClearDsv(dsv, flags, depth, stencil, rects.map(<[_]>::to_vec)));
+        self.push(Op::ClearDsv(
+            dsv,
+            flags,
+            depth,
+            stencil,
+            rects.map(<[_]>::to_vec),
+        ));
     }
     pub(super) unsafe fn RSSetViewports(&self, viewports: &[Direct3D12::D3D12_VIEWPORT]) {
         self.push(Op::Viewports(viewports.to_vec()));
@@ -356,7 +383,10 @@ impl Recorder {
     pub(super) unsafe fn IASetPrimitiveTopology(&self, topology: Direct3D::D3D_PRIMITIVE_TOPOLOGY) {
         self.push(Op::Topology(topology));
     }
-    pub(super) unsafe fn IASetIndexBuffer(&self, view: Option<*const Direct3D12::D3D12_INDEX_BUFFER_VIEW>) {
+    pub(super) unsafe fn IASetIndexBuffer(
+        &self,
+        view: Option<*const Direct3D12::D3D12_INDEX_BUFFER_VIEW>,
+    ) {
         // SAFETY: a valid pointer from the caller.
         self.push(Op::IndexBuffer(view.map(|view| unsafe { *view })));
     }
@@ -366,7 +396,13 @@ impl Recorder {
     pub(super) unsafe fn OMSetBlendFactor(&self, color: Option<&[f32; 4]>) {
         self.push(Op::BlendFactor(color.copied()));
     }
-    pub(super) unsafe fn DrawInstanced(&self, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
+    pub(super) unsafe fn DrawInstanced(
+        &self,
+        vertices: u32,
+        instances: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
         self.push(Op::Draw(vertices, instances, first_vertex, first_instance));
     }
     pub(super) unsafe fn DrawIndexedInstanced(
@@ -377,7 +413,13 @@ impl Recorder {
         base_vertex: i32,
         first_instance: u32,
     ) {
-        self.push(Op::DrawIndexed(indices, instances, first_index, base_vertex, first_instance));
+        self.push(Op::DrawIndexed(
+            indices,
+            instances,
+            first_index,
+            base_vertex,
+            first_instance,
+        ));
     }
     pub(super) unsafe fn Dispatch(&self, x: u32, y: u32, z: u32) {
         self.push(Op::Dispatch(x, y, z));
@@ -524,9 +566,7 @@ pub(super) unsafe fn replay(
                 }
                 Op::PipelineState(pipeline) => list.SetPipelineState(&pipeline),
                 Op::Topology(topology) => list.IASetPrimitiveTopology(topology),
-                Op::IndexBuffer(view) => {
-                    list.IASetIndexBuffer(view.as_ref().map(ptr::from_ref))
-                }
+                Op::IndexBuffer(view) => list.IASetIndexBuffer(view.as_ref().map(ptr::from_ref)),
                 Op::StencilRef(value) => list.OMSetStencilRef(value),
                 Op::BlendFactor(color) => list.OMSetBlendFactor(color.as_ref()),
                 Op::Draw(a, b, c, d) => list.DrawInstanced(a, b, c, d),

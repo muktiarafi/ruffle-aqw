@@ -1273,7 +1273,11 @@ fn aqw_path<'gc>(dobj: DisplayObject<'gc>) -> String {
             parts.push("..".to_string());
             break;
         }
-        parts.push(object.name().map_or_else(|| "?".to_string(), |n| n.to_string()));
+        parts.push(
+            object
+                .name()
+                .map_or_else(|| "?".to_string(), |n| n.to_string()),
+        );
         node = object.parent();
     }
     parts.reverse();

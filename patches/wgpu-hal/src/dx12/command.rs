@@ -1,19 +1,14 @@
 use alloc::vec::Vec;
 use core::{mem, ops::Range};
 
-use windows::{
-    Win32::{
-        Foundation,
-        Graphics::{Direct3D12, Dxgi},
-    },
+use windows::Win32::{
+    Foundation,
+    Graphics::{Direct3D12, Dxgi},
 };
 
 use super::conv;
 use crate::{
-    auxil::{
-        self,
-        dxgi::result::HResult as _,
-    },
+    auxil::{self, dxgi::result::HResult as _},
     dx12::borrow_interface_temporarily,
     AccelerationStructureEntries, CommandEncoder as _,
 };
@@ -88,7 +83,9 @@ impl Drop for super::CommandEncoder {
 impl super::CommandEncoder {
     /// AQW build: a real command list to replay recordings into, open with this encoder's
     /// allocator: from the free lists, else newly created.
-    fn acquire_list(&mut self) -> Result<Direct3D12::ID3D12GraphicsCommandList, crate::DeviceError> {
+    fn acquire_list(
+        &mut self,
+    ) -> Result<Direct3D12::ID3D12GraphicsCommandList, crate::DeviceError> {
         loop {
             let free = self
                 .free_lists
@@ -488,8 +485,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
             return Ok(());
         }
         let mut merged = Vec::with_capacity(4);
-        let mut open: Option<(Direct3D12::ID3D12GraphicsCommandList, super::record::ReplayState)> =
-            None;
+        let mut open: Option<(
+            Direct3D12::ID3D12GraphicsCommandList,
+            super::record::ReplayState,
+        )> = None;
         for cmd_buf in command_buffers.drain(..) {
             match cmd_buf.raw {
                 super::CommandBufferRaw::Recorded(mut ops) => {
@@ -919,7 +918,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         acceleration_structure: &super::AccelerationStructure,
         buf: &super::Buffer,
     ) {
-        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!("AQW build: ray tracing is not supported by the recording D3D12 encoder");
+        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!(
+            "AQW build: ray tracing is not supported by the recording D3D12 encoder"
+        );
         unsafe {
             list.EmitRaytracingAccelerationStructurePostbuildInfo(
                 &Direct3D12::D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC {
@@ -1438,8 +1439,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         group_count_z: u32,
     ) {
         self.prepare_dispatch([group_count_x, group_count_y, group_count_z]);
-        let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 =
-            unimplemented!("AQW build: mesh shading is not supported by the recording D3D12 encoder");
+        let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 = unimplemented!(
+            "AQW build: mesh shading is not supported by the recording D3D12 encoder"
+        );
         unsafe {
             cmd_list6.DispatchMesh(group_count_x, group_count_y, group_count_z);
         }
@@ -1531,8 +1533,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         draw_count: u32,
     ) {
         self.prepare_dispatch([0; 3]);
-        let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 =
-            unimplemented!("AQW build: mesh shading is not supported by the recording D3D12 encoder");
+        let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 = unimplemented!(
+            "AQW build: mesh shading is not supported by the recording D3D12 encoder"
+        );
         let Some(cmd_signature) = &self.shared.cmd_signatures.draw_mesh else {
             panic!("Feature `MESH_SHADING` not enabled");
         };
@@ -1591,8 +1594,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         max_count: u32,
     ) {
         self.prepare_dispatch([0; 3]);
-        let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 =
-            unimplemented!("AQW build: mesh shading is not supported by the recording D3D12 encoder");
+        let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 = unimplemented!(
+            "AQW build: mesh shading is not supported by the recording D3D12 encoder"
+        );
         let Some(ref command_signature) = self.shared.cmd_signatures.draw_mesh else {
             panic!("Feature `MESH_SHADING` not enabled");
         };
@@ -1711,7 +1715,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
     {
         // Implement using `BuildRaytracingAccelerationStructure`:
         // https://microsoft.github.io/DirectX-Specs/d3d/Raytracing.html#buildraytracingaccelerationstructure
-        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!("AQW build: ray tracing is not supported by the recording D3D12 encoder");
+        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!(
+            "AQW build: ray tracing is not supported by the recording D3D12 encoder"
+        );
         for descriptor in descriptors {
             // TODO: This is the same as getting build sizes apart from requiring buffers, should this be de-duped?
             let mut geometry_desc;
@@ -1877,7 +1883,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         _barriers: crate::AccelerationStructureBarrier,
     ) {
         // TODO: This is not very optimal, we should be using [enhanced barriers](https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html) if possible
-        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!("AQW build: ray tracing is not supported by the recording D3D12 encoder");
+        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!(
+            "AQW build: ray tracing is not supported by the recording D3D12 encoder"
+        );
         unsafe {
             list.ResourceBarrier(&[Direct3D12::D3D12_RESOURCE_BARRIER {
                 Type: Direct3D12::D3D12_RESOURCE_BARRIER_TYPE_UAV,
@@ -1901,7 +1909,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         dst: &super::AccelerationStructure,
         copy: wgt::AccelerationStructureCopy,
     ) {
-        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!("AQW build: ray tracing is not supported by the recording D3D12 encoder");
+        let list: Direct3D12::ID3D12GraphicsCommandList4 = unimplemented!(
+            "AQW build: ray tracing is not supported by the recording D3D12 encoder"
+        );
         unsafe {
             list.CopyRaytracingAccelerationStructure(
                 dst.resource.GetGPUVirtualAddress(),

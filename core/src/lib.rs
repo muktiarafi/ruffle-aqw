@@ -7,11 +7,9 @@
 
 #[macro_use]
 mod display_object;
-pub use display_object::{StageAlign, StageDisplayState, StageScaleMode};
-/// AQW build: frees GPU geometry of shapes not drawn for a while (when GPU memory is low).
-pub use tessellation_cache::evict_unused as evict_unused_shapes;
-/// AQW build: the size detailed shapes are tessellated for at least (see `tessellation_cache`).
-pub use tessellation_cache::set_min_size as set_shape_min_px;
+/// Turu: a text field's selection, for Turu's Android build, which keeps the game's focused field
+/// in step with a native text field above the soft keyboard.
+pub use display_object::TextSelection;
 /// AQW build: how long a frame waits for its new shapes (see `deferred_shapes`).
 pub use display_object::graphic::deferred_shapes::set_wait as set_shape_wait;
 /// AQW build: lets go of the shapes still being tessellated, at shutdown (see
@@ -19,9 +17,11 @@ pub use display_object::graphic::deferred_shapes::set_wait as set_shape_wait;
 pub use display_object::graphic::deferred_shapes::shutdown as shutdown_deferred_shapes;
 /// AQW build: frame interpolation (an option, off by default).
 pub use display_object::interp as frame_interpolation;
-/// Turu: a text field's selection, for Turu's Android build, which keeps the game's focused field
-/// in step with a native text field above the soft keyboard.
-pub use display_object::TextSelection;
+pub use display_object::{StageAlign, StageDisplayState, StageScaleMode};
+/// AQW build: frees GPU geometry of shapes not drawn for a while (when GPU memory is low).
+pub use tessellation_cache::evict_unused as evict_unused_shapes;
+/// AQW build: the size detailed shapes are tessellated for at least (see `tessellation_cache`).
+pub use tessellation_cache::set_min_size as set_shape_min_px;
 
 #[macro_use]
 extern crate num_derive;

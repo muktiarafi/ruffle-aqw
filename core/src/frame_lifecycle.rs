@@ -389,7 +389,10 @@ pub mod early_scripts {
         RUNNING.set(false);
         PARENTED.set(false);
         let (all_walks, micros) = WALKS.get();
-        WALKS.set((all_walks + walks, micros + started.elapsed().as_micros() as u64));
+        WALKS.set((
+            all_walks + walks,
+            micros + started.elapsed().as_micros() as u64,
+        ));
         if COUNTS.get().1 != before {
             COUNTS.with(|c| {
                 let (runs, scripts, drawn) = c.get();

@@ -281,7 +281,9 @@ impl ActivePlayer {
         // AQW build: with the render thread on, pictures are recorded there (see
         // `ruffle_render_wgpu::render_thread`).
         let renderer: Box<dyn RenderBackend> = if ruffle_render_wgpu::render_thread::enabled() {
-            Box::new(ruffle_render_wgpu::render_thread::ThreadedBackend::new(renderer))
+            Box::new(ruffle_render_wgpu::render_thread::ThreadedBackend::new(
+                renderer,
+            ))
         } else {
             Box::new(renderer)
         };

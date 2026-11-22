@@ -1,11 +1,11 @@
 use crate::context::RenderContext;
+use crate::tessellation_cache::TessellationCache;
 use ruffle_render::backend::{RenderBackend, ShapeHandle};
 use ruffle_render::bitmap::{BitmapHandle, BitmapInfo, BitmapSize, BitmapSource};
 use ruffle_render::commands::CommandHandler;
 use ruffle_render::shape_utils::{
     DistilledShape, DrawCommand, DrawPath, FillRule, cubic_curve_bounds, quadratic_curve_bounds,
 };
-use crate::tessellation_cache::TessellationCache;
 use ruffle_render::tessellator::{EdgeMode, edge_mode};
 use std::cell::RefCell;
 use std::rc::Rc;

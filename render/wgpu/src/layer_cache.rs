@@ -35,8 +35,8 @@ use crate::{Texture, as_texture};
 use ruffle_render::commands::{Command, CommandList};
 use ruffle_render::quality::StageQuality;
 use ruffle_render::transform::Transform;
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -246,11 +246,14 @@ impl LayerCache {
             if !check.map_requested && picture >= check.recorded + 2 {
                 check.map_requested = true;
                 let mapped = check.mapped.clone();
-                check.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-                    if result.is_ok() {
-                        mapped.store(true, Ordering::Release);
-                    }
-                });
+                check
+                    .buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        if result.is_ok() {
+                            mapped.store(true, Ordering::Release);
+                        }
+                    });
             } else if check.map_requested && picture >= check.recorded + 60 {
                 // The GPU never answered (or the mapping failed): give it up.
                 done.push(i);
@@ -294,7 +297,11 @@ impl LayerCache {
             if over > 0 {
                 crate::perf_counters::inc(crate::perf_counters::LAYER_CACHE_MISMATCH);
                 if self.reported.insert(check.key) {
-                    let verdict = if big > STALE_COUNT { "STALE" } else { "suspect" };
+                    let verdict = if big > STALE_COUNT {
+                        "STALE"
+                    } else {
+                        "suspect"
+                    };
                     tracing::warn!(
                         target: "ruffle_aqw_perf",
                         "layer cache CHECK {verdict}: key {:016x} differs from a fresh render: {} channel values over {}/255, {} over {}/255, largest {}/255, in a {}x{} slot; layer: {}",
@@ -313,7 +320,15 @@ impl LayerCache {
         }
     }
 
-    pub fn insert(&mut self, key: u64, page: Arc<AtlasPage>, x: u32, y: u32, width: u32, height: u32) {
+    pub fn insert(
+        &mut self,
+        key: u64,
+        page: Arc<AtlasPage>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) {
         let now = Instant::now();
         self.page_made
             .entry(Arc::as_ptr(&page) as usize)
@@ -343,14 +358,17 @@ impl LayerCache {
         }
         self.seen_last = std::mem::take(&mut self.seen_now);
         let now = Instant::now();
-        self.entries.retain(|_, entry| now.duration_since(entry.last_used) <= KEEP);
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.last_used) <= KEEP);
 
         // Per page: entries, their live slot area, and the page's bytes.
         let mut pages: HashMap<usize, (usize, u64, u64)> = HashMap::new();
         for entry in self.entries.values() {
-            let page = pages
-                .entry(Arc::as_ptr(&entry.page) as usize)
-                .or_insert((0, 0, entry.page.bytes()));
+            let page = pages.entry(Arc::as_ptr(&entry.page) as usize).or_insert((
+                0,
+                0,
+                entry.page.bytes(),
+            ));
             page.0 += 1;
             page.1 += entry.width as u64 * entry.height as u64;
         }
@@ -434,7 +452,6 @@ impl LayerCache {
         }
         (pages.len(), pages.values().sum(), self.entries.len())
     }
-
 }
 
 /// What a leaf layer's pixels and slot depend on, as a 64-bit key, or `None` for a layer that

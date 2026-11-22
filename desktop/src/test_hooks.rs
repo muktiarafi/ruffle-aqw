@@ -240,9 +240,7 @@ impl WindowAction {
                 window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
             }
             WindowAction::Uncapped(on) => crate::mugetsu::set_uncapped(on),
-            WindowAction::Menu
-            | WindowAction::OfferRestart
-            | WindowAction::Interpolation(_) => {}
+            WindowAction::Menu | WindowAction::OfferRestart | WindowAction::Interpolation(_) => {}
             WindowAction::LoseDevice => {
                 if let Some(player) = player {
                     ruffle_render_wgpu::render_thread::with_wgpu_backend(

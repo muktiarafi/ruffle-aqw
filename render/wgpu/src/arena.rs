@@ -111,7 +111,9 @@ impl ArenaInner {
                 .filter(|(i, c)| *i != chunk_index && c.as_ref().is_some_and(|c| !c.dedicated))
                 .count();
             // Free empty chunks, but keep one shared chunk around for new shapes.
-            if self.chunks[chunk_index].as_ref().is_some_and(|c| c.dedicated)
+            if self.chunks[chunk_index]
+                .as_ref()
+                .is_some_and(|c| c.dedicated)
                 || other_shared_chunks > 0
             {
                 self.chunks[chunk_index] = None;
@@ -177,8 +179,8 @@ impl BufferArena {
             return Ok(None);
         }
         let mut inner = self.inner.lock().expect("arena lock");
-        let size = (data.len() as wgpu::BufferAddress + multiple - 1)
-            .next_multiple_of(inner.alignment);
+        let size =
+            (data.len() as wgpu::BufferAddress + multiple - 1).next_multiple_of(inner.alignment);
 
         // First fit in an existing shared chunk. Every allocation is a multiple of the
         // alignment, so free ranges always start aligned.
@@ -243,7 +245,10 @@ impl BufferArena {
                 .live
                 .range((chunk_index, 0)..(chunk_index, start + size))
                 .any(|(&(_, s), &e)| s < start + size && start < e);
-            assert!(!overlap, "arena: overlapping allocation at {chunk_index}:{start}+{size}");
+            assert!(
+                !overlap,
+                "arena: overlapping allocation at {chunk_index}:{start}+{size}"
+            );
             inner.live.insert((chunk_index, start), start + size);
         }
         let buffer = inner.chunks[chunk_index]

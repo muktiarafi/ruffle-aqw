@@ -409,7 +409,9 @@ impl<'gc> Avm2<'gc> {
                 && let Some(loader_info) = weak.0.upgrade(fc)
             {
                 let loader_info = object::LoaderInfoObject(loader_info);
-                anchored.insert(crate::library::Library::movie_addr(loader_info.loader_stream().movie()));
+                anchored.insert(crate::library::Library::movie_addr(
+                    loader_info.loader_stream().movie(),
+                ));
             }
         }
         for anchor in &self.code_anchors {
@@ -612,7 +614,10 @@ impl<'gc> Avm2<'gc> {
             .context
             .avm2
             .code_anchors
-            .push(crate::library::MovieAnchor::new(tunit.downgrade_erased(), tunit.movie()));
+            .push(crate::library::MovieAnchor::new(
+                tunit.downgrade_erased(),
+                tunit.movie(),
+            ));
         tunit.load_classes(&mut activation)?;
         for i in 0..num_scripts {
             tunit.load_script(i as u32, &mut activation)?;
@@ -877,7 +882,10 @@ pub mod aqw_errors {
     pub fn new_frame(epoch: u64) {
         static TURN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         let turn = *TURN.get_or_init(|| {
-            std::env::var("RUFFLE_ERRORS_ONCE_AB").ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+            std::env::var("RUFFLE_ERRORS_ONCE_AB")
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0)
         });
         if turn > 0 {
             PAUSED.store((epoch / turn) % 2 == 1, Ordering::Relaxed);

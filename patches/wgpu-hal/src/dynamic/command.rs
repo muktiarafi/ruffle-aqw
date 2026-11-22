@@ -268,11 +268,10 @@ impl<C: CommandEncoder + DynResource> DynCommandEncoder for C {
         if !C::MERGES_COMMAND_BUFFERS {
             return Ok(());
         }
-        let mut typed: Vec<<C::A as Api>::CommandBuffer> =
-            core::mem::take(command_buffers)
-                .into_iter()
-                .map(|cb| unsafe { cb.unbox() })
-                .collect();
+        let mut typed: Vec<<C::A as Api>::CommandBuffer> = core::mem::take(command_buffers)
+            .into_iter()
+            .map(|cb| unsafe { cb.unbox() })
+            .collect();
         let result = unsafe { C::merge_command_buffers(self, &mut typed) };
         *command_buffers = typed
             .into_iter()

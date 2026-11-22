@@ -275,7 +275,9 @@ impl RenderTarget for MovieView {
         &self,
         _frame: Self::Frame,
     ) -> Result<ruffle_render_wgpu::target::LaterSubmit, Self::Frame> {
-        Ok(Box::new(|queue, command_buffers| queue.submit(command_buffers)))
+        Ok(Box::new(|queue, command_buffers| {
+            queue.submit(command_buffers)
+        }))
     }
 }
 

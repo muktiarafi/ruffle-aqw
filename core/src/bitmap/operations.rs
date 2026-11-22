@@ -1632,7 +1632,14 @@ pub fn draw<'gc>(
         Some(sync_handle) => {
             write.set_gpu_dirty(context.gc(), sync_handle, dirty_region);
             if let Some((commands, scale, was)) = sharp {
-                write.draw_sharp(context.gc(), context.renderer, was, scale, commands, quality);
+                write.draw_sharp(
+                    context.gc(),
+                    context.renderer,
+                    was,
+                    scale,
+                    commands,
+                    quality,
+                );
             }
             Ok(())
         }

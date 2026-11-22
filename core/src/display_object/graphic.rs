@@ -268,10 +268,7 @@ impl<'gc> Graphic<'gc> {
     /// keeps the parts outside the grid at their size: corners aren't scaled, the side parts
     /// only along the side, the center normally. Returns the sliced shape's handle and the
     /// matrix to draw it with (the parent's scale is in the shape's points instead).
-    fn sliced_handle(
-        self,
-        context: &mut RenderContext<'_, 'gc>,
-    ) -> Option<(ShapeHandle, Matrix)> {
+    fn sliced_handle(self, context: &mut RenderContext<'_, 'gc>) -> Option<(ShapeHandle, Matrix)> {
         let parent = self.parent()?;
         let grid = parent.scaling_grid();
         if grid.width() <= Twips::ZERO || grid.height() <= Twips::ZERO {
@@ -546,7 +543,8 @@ impl GraphicShared<'_> {
     /// AQW build: the tessellations at the scales drawn at, made when first asked for: ~600
     /// bytes per shape, and most shapes are never drawn (none are without a window).
     fn scaled_handle(&self) -> &Rc<RefCell<TessellationCache>> {
-        self.scaled_handle.get_or_init(TessellationCache::new_shared)
+        self.scaled_handle
+            .get_or_init(TessellationCache::new_shared)
     }
 
     /// AQW build: the shape, parsed from its tag the first time it's asked for (an identical
@@ -777,7 +775,12 @@ pub mod deferred_shapes {
         static BUDGET: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
         *BUDGET.get_or_init(|| {
             let value = std::env::var("RUFFLE_SHAPE_BUDGET").ok()?;
-            let ms = value.trim().parse::<f64>().ok().filter(|ms| *ms >= 2.0).unwrap_or(4.0);
+            let ms = value
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|ms| *ms >= 2.0)
+                .unwrap_or(4.0);
             Some(Duration::from_secs_f64(ms.min(1000.0) / 1000.0))
         })
     }
@@ -1040,14 +1043,25 @@ pub mod deferred_shapes {
             let mut needed = HashSet::new();
             needs(commands, &by_placeholder, false, &mut needed);
             for entry in cache_draws.iter() {
-                needs(&entry.commands, &by_placeholder, wait_for_cached(), &mut needed);
+                needs(
+                    &entry.commands,
+                    &by_placeholder,
+                    wait_for_cached(),
+                    &mut needed,
+                );
             }
             let needed: Vec<u64> = needed.into_iter().collect();
 
             let work = sources
                 .iter()
                 .map(|(ticket, source, shape, scale)| {
-                    (*ticket, shape.clone(), scale.scale, scale.stretch, source as &dyn BitmapSource)
+                    (
+                        *ticket,
+                        shape.clone(),
+                        scale.scale,
+                        scale.stretch,
+                        source as &dyn BitmapSource,
+                    )
                 })
                 .collect();
             // What earlier frames' budgets left over comes first (see `upload_budget`).
@@ -1135,15 +1149,19 @@ pub mod deferred_shapes {
                         url_of(job.movie)
                     );
                 }
-                job.cache.borrow_mut().replace(&job.placeholder, handle.clone());
+                job.cache
+                    .borrow_mut()
+                    .replace(&job.placeholder, handle.clone());
                 results.insert(key(&job.placeholder), handle);
             }
 
             // Still being tessellated: left out of this frame.
-            let running: HashSet<*const ()> = RUNNING.with_borrow(|running| {
-                running.values().map(|job| key(&job.placeholder)).collect()
-            });
-            let waiting = tickets.iter().filter(|t| RUNNING.with_borrow(|r| r.contains_key(t))).count();
+            let running: HashSet<*const ()> = RUNNING
+                .with_borrow(|running| running.values().map(|job| key(&job.placeholder)).collect());
+            let waiting = tickets
+                .iter()
+                .filter(|t| RUNNING.with_borrow(|r| r.contains_key(t)))
+                .count();
             if waiting > 0 || put_off > 0 {
                 tracing::info!(
                     target: "ruffle_aqw_perf",
@@ -1217,7 +1235,11 @@ pub mod deferred_shapes {
         found
     }
 
-    fn collect_running(list: &CommandList, running: &HashSet<*const ()>, found: &mut Vec<*const ()>) {
+    fn collect_running(
+        list: &CommandList,
+        running: &HashSet<*const ()>,
+        found: &mut Vec<*const ()>,
+    ) {
         for command in &list.commands {
             match command {
                 Command::RenderShape { shape, .. } => {

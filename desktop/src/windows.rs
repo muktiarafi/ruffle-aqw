@@ -175,9 +175,10 @@ unsafe extern "system" fn crash_filter(
     let record = format!(
         "fatal native crash: exception 0x{code:08X} in {} at offset 0x{:X} (thread {thread}, \
         {}, Vulkan starting: {vulkan_starting}, DirectX 12 starting: {dx12_starting})",
-        module
-            .as_ref()
-            .map_or_else(|| "an unknown module".to_string(), |m| m.path.display().to_string()),
+        module.as_ref().map_or_else(
+            || "an unknown module".to_string(),
+            |m| m.path.display().to_string()
+        ),
         module.as_ref().map_or(0, |m| m.offset),
         crate::mugetsu::exit_phase()
     );
@@ -322,7 +323,12 @@ fn raw_stack() -> String {
     let mut frames = [std::ptr::null_mut::<std::ffi::c_void>(); 62];
     // SAFETY: the buffer and its length match; the hash is optional.
     let count = unsafe {
-        RtlCaptureStackBackTrace(0, frames.len() as u32, frames.as_mut_ptr(), std::ptr::null_mut())
+        RtlCaptureStackBackTrace(
+            0,
+            frames.len() as u32,
+            frames.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
     };
     let mut text = String::from("stack (module+offset):\n");
     for frame in &frames[..count as usize] {
@@ -538,9 +544,21 @@ mod graphics_menu {
         EVENTS.with(|e| *e.borrow_mut() = Some(events));
         let current = mugetsu::saved_graphics();
         let items = [
-            (AUTOMATIC, "Graphics: Automatic (recommended)", current.is_none()),
-            (VULKAN, "Graphics: Vulkan", current == Some(Graphics::Vulkan)),
-            (DX12, "Graphics: DirectX 12", current == Some(Graphics::Dx12)),
+            (
+                AUTOMATIC,
+                "Graphics: Automatic (recommended)",
+                current.is_none(),
+            ),
+            (
+                VULKAN,
+                "Graphics: Vulkan",
+                current == Some(Graphics::Vulkan),
+            ),
+            (
+                DX12,
+                "Graphics: DirectX 12",
+                current == Some(Graphics::Dx12),
+            ),
         ];
         // SAFETY: `hwnd` is our live window, on its own thread; the strings outlive the calls.
         // The replaced window procedure is kept and called for everything else.
@@ -578,7 +596,8 @@ mod graphics_menu {
             if let Some(choice) = choice {
                 EVENTS.with(|e| {
                     if let Some(events) = &*e.borrow() {
-                        let _ = events.send_event(RuffleEvent::MugetsuSetting(Setting::Graphics(choice)));
+                        let _ = events
+                            .send_event(RuffleEvent::MugetsuSetting(Setting::Graphics(choice)));
                     }
                 });
                 return 0;
@@ -609,7 +628,6 @@ mod graphics_menu {
             }
         }
     }
-
 }
 
 fn hwnd_of(window: &winit::window::Window) -> Option<windows_sys::Win32::Foundation::HWND> {

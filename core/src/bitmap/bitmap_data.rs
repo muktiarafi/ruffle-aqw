@@ -979,7 +979,9 @@ impl<'gc> BitmapRawData<'gc> {
             Sharp::None => return None,
             Sharp::Copy { width, height, .. } => (width, height),
             Sharp::Blank(_) => {
-                let scale = (view.a.hypot(view.b)).max(view.c.hypot(view.d)).min(Sharp::MOST);
+                let scale = (view.a.hypot(view.b))
+                    .max(view.c.hypot(view.d))
+                    .min(Sharp::MOST);
                 if !(scale >= Sharp::LEAST) {
                     return None;
                 }
@@ -989,7 +991,10 @@ impl<'gc> BitmapRawData<'gc> {
                 )
             }
         };
-        Some((width as f32 / self.width as f32, height as f32 / self.height as f32))
+        Some((
+            width as f32 / self.width as f32,
+            height as f32 / self.height as f32,
+        ))
     }
 
     /// AQW build: the sharp copy as it is, leaving none (for `operations::draw`, which puts
@@ -1012,13 +1017,21 @@ impl<'gc> BitmapRawData<'gc> {
         use std::sync::atomic::Ordering::Relaxed;
         let (handle, width, height, new) = match was {
             Sharp::None => return,
-            Sharp::Copy { handle, width, height } => (handle, width, height, false),
+            Sharp::Copy {
+                handle,
+                width,
+                height,
+            } => (handle, width, height, false),
             Sharp::Blank(fill) => {
                 let width = (self.width as f32 * scale.0).round() as u32;
                 let height = (self.height as f32 * scale.1).round() as u32;
                 let pixels = vec![fill; width as usize * height as usize];
-                let bitmap =
-                    Bitmap::new(width, height, BitmapFormat::Rgba, Color::slice_as_rgba(&pixels));
+                let bitmap = Bitmap::new(
+                    width,
+                    height,
+                    BitmapFormat::Rgba,
+                    Color::slice_as_rgba(&pixels),
+                );
                 let Ok(handle) = renderer.register_bitmap(bitmap) else {
                     return;
                 };
@@ -1035,7 +1048,11 @@ impl<'gc> BitmapRawData<'gc> {
         if drawn.is_none() {
             return;
         }
-        self.sharp = Sharp::Copy { handle, width, height };
+        self.sharp = Sharp::Copy {
+            handle,
+            width,
+            height,
+        };
         SHARP_DRAWS.fetch_add(1, Relaxed);
         if new {
             SHARP_COPIES.fetch_add(1, Relaxed);

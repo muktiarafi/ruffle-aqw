@@ -305,9 +305,7 @@ fn ramp(gradient: &Gradient) -> [u8; GRADIENT_SIZE * 4] {
         };
 
         for t in 0..GRADIENT_SIZE {
-            if last + 1 < gradient.records.len()
-                && t > gradient.records[last + 1].ratio as usize
-            {
+            if last + 1 < gradient.records.len() && t > gradient.records[last + 1].ratio as usize {
                 last += 1;
             }
             next = (last + 1).min(gradient.records.len() - 1);
@@ -317,8 +315,7 @@ fn ramp(gradient: &Gradient) -> [u8; GRADIENT_SIZE * 4] {
             let last_record = &gradient.records[last];
             let next_record = &gradient.records[next];
 
-            let a = if t <= last_record.ratio as usize || last_record.ratio == next_record.ratio
-            {
+            let a = if t <= last_record.ratio as usize || last_record.ratio == next_record.ratio {
                 // We are before the first gradient record,
                 // or this record's ratio is equal to the next one,
                 // meaning we need to do a full stop of this color for 1 pixel.
@@ -404,7 +401,7 @@ impl SharedGradient {
                             buffer: uniforms.buffer(),
                             offset: uniforms.offset(),
                             size: wgpu::BufferSize::new(
-                                std::mem::size_of::<GradientUniforms>() as u64,
+                                std::mem::size_of::<GradientUniforms>() as u64
                             ),
                         }),
                     },

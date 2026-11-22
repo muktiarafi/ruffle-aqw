@@ -68,7 +68,9 @@ pub fn begin_render(frame_ms: f64) {
     let blend = if enabled() && frame_ms > 0.0 {
         FRAME_FINISHED
             .with(Cell::get)
-            .map(|started| (started.elapsed().as_secs_f64() * 1000.0 / frame_ms).clamp(0.0, 1.0) as f32)
+            .map(|started| {
+                (started.elapsed().as_secs_f64() * 1000.0 / frame_ms).clamp(0.0, 1.0) as f32
+            })
             // (`RUFFLE_TEST_INTERP_AMOUNT=0.5`, testing: every picture is drawn that far
             // between two frames, so two runs' in-between pictures can be compared.)
             .map(|amount| test_amount().unwrap_or(amount))
@@ -213,7 +215,11 @@ impl State {
             // and on an uneven rhythm (3 or 4 frames) that was every few moves. This way it
             // starts each move from where it has got to, so it's always under way, and one
             // that moves on evenly in time is drawn at an even speed.
-            if gap <= max { self.ratio_span.max(gap) } else { self.ratio_span }
+            if gap <= max {
+                self.ratio_span.max(gap)
+            } else {
+                self.ratio_span
+            }
         } else if regular(gap) && regular(self.ratio_gap) {
             // A rhythm: two intervals in a row of a few frames each.
             gap.max(self.ratio_gap)
@@ -442,7 +448,11 @@ impl Tracker {
         self.0.set(state);
         if let Some((from, p)) = held {
             let delta = (i32::from(ratio) - i32::from(from)).unsigned_abs();
-            let steps = if delta == 0 { 1 } else { tween_steps(delta, travel_px) };
+            let steps = if delta == 0 {
+                1
+            } else {
+                tween_steps(delta, travel_px)
+            };
             if steps > 1 {
                 return held_ratio(from, ratio, p, steps);
             }
@@ -462,7 +472,11 @@ impl Tracker {
             // drawn as an in-between (`TweenRatio::Real` ratios are tessellated for keeps,
             // however slow that is).
             let delta = (i32::from(ratio) - i32::from(from)).unsigned_abs();
-            let steps = if delta == 0 { 1 } else { tween_steps(delta, travel_px) };
+            let steps = if delta == 0 {
+                1
+            } else {
+                tween_steps(delta, travel_px)
+            };
             return held_ratio(from, ratio, t, steps);
         }
         let delta = (i32::from(ratio) - i32::from(previous)).unsigned_abs();
@@ -490,7 +504,8 @@ fn held_ratio(from: u16, to: u16, p: f32, steps: u32) -> TweenRatio {
         return TweenRatio::Real(to);
     }
     let steps = steps as f32;
-    let blended = i32::from(from) + (delta as f32 * ((p.max(0.0) * steps).floor() / steps)).round() as i32;
+    let blended =
+        i32::from(from) + (delta as f32 * ((p.max(0.0) * steps).floor() / steps)).round() as i32;
     let stepped = ((blended + 8) / 16 * 16).clamp(0, 65535);
     if (stepped - i32::from(to)) * delta.signum() >= 0 {
         TweenRatio::Real(to)
@@ -539,8 +554,14 @@ fn by_distance() -> bool {
 /// moves `moved_px` pixels on screen in the frame.
 fn steps_for(by_ratio: u32, moved_px: f32) -> u32 {
     // (A size that isn't a number, e.g. from a broken matrix, counts as no movement.)
-    let by_distance = (moved_px / TWEEN_STEP_PX).ceil().clamp(1.0, MAX_TWEEN_STEPS as f32);
-    by_ratio.max(if by_distance.is_nan() { 1 } else { by_distance as u32 })
+    let by_distance = (moved_px / TWEEN_STEP_PX)
+        .ceil()
+        .clamp(1.0, MAX_TWEEN_STEPS as f32);
+    by_ratio.max(if by_distance.is_nan() {
+        1
+    } else {
+        by_distance as u32
+    })
 }
 
 /// How a shape tween is drawn right now (see `Tracker::ratio`).
@@ -813,7 +834,10 @@ mod tests {
                 flags: swf::GlowFilterFlags::empty(),
             })
         };
-        assert_eq!(blend_filter(&glow(2.0, 0), &glow(6.0, 200), 0.5), Some(glow(4.0, 100)));
+        assert_eq!(
+            blend_filter(&glow(2.0, 0), &glow(6.0, 200), 0.5),
+            Some(glow(4.0, 100))
+        );
         let blur = Filter::BlurFilter(swf::BlurFilter {
             blur_x: Fixed16::from_f32(4.0),
             blur_y: Fixed16::from_f32(4.0),
@@ -904,7 +928,10 @@ mod tests {
             .windows(2)
             .map(|pair| i32::from(pair[1]) - i32::from(pair[0]))
             .collect();
-        assert!(steps.iter().all(|step| (600..=890).contains(step)), "{steps:?} {ends:?}");
+        assert!(
+            steps.iter().all(|step| (600..=890).contains(step)),
+            "{steps:?} {ends:?}"
+        );
         // And it's never ahead of its real ratio.
         assert!(ends.iter().all(|end| *end <= ratio));
     }
@@ -925,7 +952,10 @@ mod tests {
         // The move after the long interval is still drawn through its 3 frames.
         ratio += 745;
         let first = frame_of(&tracker, &rhythm, ratio);
-        assert!(first.0 <= ratio - 745 + 16 && first.1 < ratio - 400, "{first:?}");
+        assert!(
+            first.0 <= ratio - 745 + 16 && first.1 < ratio - 400,
+            "{first:?}"
+        );
         frame_of(&tracker, &rhythm, ratio);
         frame_of(&tracker, &rhythm, ratio);
         assert_eq!(frame_of(&tracker, &rhythm, ratio), (ratio, ratio));
@@ -1015,9 +1045,16 @@ mod tests {
         let second = Tracker::default();
         let shown: Vec<(u16, u16)> = (0..3).map(|_| frame_of(&second, &rhythm, 1490)).collect();
         assert!(shown[0].0 <= 16 && shown[0].1 < 700, "{shown:?}");
-        assert!(shown.windows(2).all(|pair| pair[0].1 <= pair[1].0 && pair[1].0 < pair[1].1));
+        assert!(
+            shown
+                .windows(2)
+                .all(|pair| pair[0].1 <= pair[1].0 && pair[1].0 < pair[1].1)
+        );
         let moved = frame_of(&second, &rhythm, 1490 + 2235);
-        assert!(moved.0.abs_diff(1490) <= 16 && moved.1 < 1490 + 1000, "{moved:?}");
+        assert!(
+            moved.0.abs_diff(1490) <= 16 && moved.1 < 1490 + 1000,
+            "{moved:?}"
+        );
 
         // One that comes on screen far from the start is drawn where it is; its first move a
         // few frames later (the others' rhythm still fresh) is drawn through the interval.
@@ -1055,7 +1092,10 @@ mod tests {
         // Once its rhythm is known (the third move, frame 9), it moves in every frame and
         // never backwards, one interval behind its real ratio.
         let held = &shown[9..];
-        assert!(held.windows(2).all(|pair| pair[0].1 <= pair[1].0 && pair[1].0 <= pair[1].1));
+        assert!(
+            held.windows(2)
+                .all(|pair| pair[0].1 <= pair[1].0 && pair[1].0 <= pair[1].1)
+        );
         let moves = held.windows(2).filter(|pair| pair[1].0 > pair[0].0).count();
         assert!(moves >= 7, "{held:?}");
         // Right after a move it's still near where it was, and reaches it by the next move.
@@ -1085,7 +1125,10 @@ mod tests {
 
     #[test]
     fn held_ratios_step_to_the_real_one() {
-        let between = |ratio| TweenRatio::Between { ratio, previous: 3235 };
+        let between = |ratio| TweenRatio::Between {
+            ratio,
+            previous: 3235,
+        };
         // (1000 -> 3235 in 3 steps; rounded to 16.)
         assert_eq!(held_ratio(1000, 3235, 0.0, 3), between(1008));
         assert_eq!(held_ratio(1000, 3235, 0.4, 3), between(1744));

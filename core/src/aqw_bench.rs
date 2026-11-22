@@ -278,7 +278,10 @@ mod census {
                 .map(|addr| name_of(*addr))
                 .filter(|name| !passes_on(name))
                 .collect();
-            let site = named.first().cloned().unwrap_or_else(|| "(unknown)".to_owned());
+            let site = named
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "(unknown)".to_owned());
             let area = site.split("::").take(3).collect::<Vec<_>>().join("::");
             *by_site.entry(site).or_default() += *bytes;
             *by_area.entry(area).or_default() += *bytes;
@@ -322,7 +325,12 @@ mod census {
                 "    {:7.1} MB {:5.1}%  {}",
                 mb(*bytes),
                 *bytes as f64 * 100.0 / total.max(1) as f64,
-                named.iter().take(7).cloned().collect::<Vec<_>>().join(" < ")
+                named
+                    .iter()
+                    .take(7)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" < ")
             );
         }
         BUSY.with(|busy| busy.set(false));
@@ -352,7 +360,10 @@ fn swf_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             swf_files(&path, files);
-        } else if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("swf")) {
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("swf"))
+        {
             files.push(path);
         }
     }
@@ -435,14 +446,14 @@ fn aqw_load_bench() {
                             activation,
                         )
                         .map_err(|e| format!("{e:?}"))?;
-                    let stage = activation
-                        .context
-                        .stage
-                        .object2()
-                        .ok_or("no AS3 stage")?;
+                    let stage = activation.context.stage.object2().ok_or("no AS3 stage")?;
                     let add_child = AvmString::new_utf8(activation.gc(), "addChild");
                     Value::from(stage)
-                        .call_public_property(add_child, FunctionArgs::from_slice(&[loader]), activation)
+                        .call_public_property(
+                            add_child,
+                            FunctionArgs::from_slice(&[loader]),
+                            activation,
+                        )
                         .map_err(|e| format!("{e:?}"))?;
                     Ok(())
                 };
@@ -477,9 +488,20 @@ fn aqw_load_bench() {
     let (parsed, shared) = crate::display_object::graphic::shared_shapes::counts();
     let movies = player.mutate_with_update_context(|context| context.library.loaded_movie_count());
 
-    println!("AQW load benchmark: {} files ({:.1} MB), {repeat} rounds", data.len(), file_bytes as f64 / MB);
-    println!("  loads: {loaded} ok, {failed} failed, {:.1} s ({:.2} ms per load)", elapsed.as_secs_f64(), elapsed.as_secs_f64() * 1000.0 / loaded.max(1) as f64);
-    println!("  player alone: {:.1} MB", (base_heap - start_heap) as f64 / MB);
+    println!(
+        "AQW load benchmark: {} files ({:.1} MB), {repeat} rounds",
+        data.len(),
+        file_bytes as f64 / MB
+    );
+    println!(
+        "  loads: {loaded} ok, {failed} failed, {:.1} s ({:.2} ms per load)",
+        elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() * 1000.0 / loaded.max(1) as f64
+    );
+    println!(
+        "  player alone: {:.1} MB",
+        (base_heap - start_heap) as f64 / MB
+    );
     println!(
         "  heap from the loads: {:.1} MB ({:.2} MB per load), {movies} movies alive",
         (end_heap - base_heap) as f64 / MB,
@@ -492,7 +514,10 @@ fn aqw_load_bench() {
 
     // `AQW_STAY_FRAMES=<n>`: everything stays on the stage for n more frames: what testing
     // libraries that are all in use costs (their revival at the end of each GC cycle).
-    if let Some(frames) = std::env::var("AQW_STAY_FRAMES").ok().and_then(|n| n.parse::<usize>().ok()) {
+    if let Some(frames) = std::env::var("AQW_STAY_FRAMES")
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+    {
         let (tested0, revived0) = crate::library::library_gc_counts();
         let (_, sum0, count0) = crate::player::gc_finalize_micros(true);
         let stay_started = std::time::Instant::now();
@@ -505,7 +530,10 @@ fn aqw_load_bench() {
         let (tested, revived) = crate::library::library_gc_counts();
         let (longest, sum, count) = crate::player::gc_finalize_micros(true);
         let (alive, freed) = player.mutate_with_update_context(|context| {
-            (context.library.loaded_movie_count(), context.library.freed_movie_count())
+            (
+                context.library.loaded_movie_count(),
+                context.library.freed_movie_count(),
+            )
         });
         println!(
             "  all on stage, {frames} frames ({:.1} s): {} GC cycles, {} libraries tested, {} revived, {freed} freed, {alive} alive; steps at a cycle's end: longest {:.2} ms, {:.2} ms a cycle; longest frame {:.1} ms",
@@ -570,7 +598,10 @@ fn aqw_load_bench() {
             }
         }
         let (alive, freed) = player.mutate_with_update_context(|context| {
-            (context.library.loaded_movie_count(), context.library.freed_movie_count())
+            (
+                context.library.loaded_movie_count(),
+                context.library.freed_movie_count(),
+            )
         });
         let (longest, _, _) = crate::player::gc_finalize_micros(false);
         println!(
@@ -625,7 +656,11 @@ fn aqw_early_scripts() {
         let stage = activation.context.stage.object2().ok_or("no AS3 stage")?;
         let add_child = AvmString::new_utf8(activation.gc(), "addChild");
         Value::from(stage)
-            .call_public_property(add_child, FunctionArgs::from_slice(&[loader]), &mut activation)
+            .call_public_property(
+                add_child,
+                FunctionArgs::from_slice(&[loader]),
+                &mut activation,
+            )
             .map_err(|e| format!("{e:?}"))?;
         Ok(())
     });
@@ -646,7 +681,11 @@ fn aqw_early_scripts() {
         }
         let get_child_at = name(&mut activation, "getChildAt");
         let loader = stage
-            .call_public_property(get_child_at, FunctionArgs::from_slice(&[1.into()]), &mut activation)
+            .call_public_property(
+                get_child_at,
+                FunctionArgs::from_slice(&[1.into()]),
+                &mut activation,
+            )
             .map_err(|e| format!("{e:?}"))?;
         let mut value = loader;
         for property in ["contentLoaderInfo", "applicationDomain"] {
@@ -669,7 +708,11 @@ fn aqw_early_scripts() {
             .map_err(|e| format!("{e:?}"))?;
         let add_child = name(&mut activation, "addChild");
         stage
-            .call_public_property(add_child, FunctionArgs::from_slice(&[part]), &mut activation)
+            .call_public_property(
+                add_child,
+                FunctionArgs::from_slice(&[part]),
+                &mut activation,
+            )
             .map_err(|e| format!("{e:?}"))?;
         Ok(())
     });
@@ -691,7 +734,11 @@ fn aqw_early_scripts() {
 
     println!(
         "early scripts {}: frame scripts run when the part was on the stage: {} ({} of them early); clips in the first picture with their script still waiting: {}; scripts run by the next frame: {}; waiting in the picture after it: {}; scripts run in five more frames: {}",
-        if early_scripts::enabled() { "ON" } else { "OFF" },
+        if early_scripts::enabled() {
+            "ON"
+        } else {
+            "OFF"
+        },
         scripts_made - scripts_before,
         early_made - early_before,
         drawn_picture - drawn_before,

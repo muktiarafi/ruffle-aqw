@@ -167,7 +167,11 @@ pub fn after_realloc(
         return;
     }
     // Failed: the old block is still there.
-    let (ptr, size) = if new.is_null() { (old, old_size) } else { (new, new_size) };
+    let (ptr, size) = if new.is_null() {
+        (old, old_size)
+    } else {
+        (new, new_size)
+    };
     if size < min_size() {
         return;
     }
@@ -299,8 +303,7 @@ struct Resolver {
 impl Resolver {
     fn new() -> Self {
         use windows_sys::Win32::System::Diagnostics::Debug::{
-            SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymInitializeW,
-            SymSetOptions,
+            SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymInitializeW, SymSetOptions,
         };
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         // SAFETY: plain dbghelp calls on the current process; initializing twice (the standard
@@ -342,7 +345,10 @@ impl Resolver {
             let len = ((*symbol).NameLen as usize).min(NAME_CHARS);
             let chars =
                 std::slice::from_raw_parts(std::ptr::addr_of!((*symbol).Name).cast::<u16>(), len);
-            format!("{:#}", rustc_demangle::demangle(&String::from_utf16_lossy(chars)))
+            format!(
+                "{:#}",
+                rustc_demangle::demangle(&String::from_utf16_lossy(chars))
+            )
         };
         let line_text = |line: &IMAGEHLP_LINEW64| unsafe {
             if line.FileName.is_null() {
@@ -361,12 +367,14 @@ impl Resolver {
             let inlined = SymAddrIncludeInlineTrace(process, addr);
             if inlined > 0 {
                 let (mut context, mut index) = (0u32, 0u32);
-                if SymQueryInlineTrace(process, addr, 0, addr, addr, &mut context, &mut index) != 0 {
+                if SymQueryInlineTrace(process, addr, 0, addr, addr, &mut context, &mut index) != 0
+                {
                     for ctx in context..context + inlined {
                         (*symbol).SizeOfStruct = std::mem::size_of::<SYMBOL_INFOW>() as u32;
                         (*symbol).MaxNameLen = NAME_CHARS as u32;
                         let mut displacement = 0u64;
-                        if SymFromInlineContextW(process, addr, ctx, &mut displacement, symbol) != 0 {
+                        if SymFromInlineContextW(process, addr, ctx, &mut displacement, symbol) != 0
+                        {
                             let mut line: IMAGEHLP_LINEW64 = std::mem::zeroed();
                             line.SizeOfStruct = std::mem::size_of::<IMAGEHLP_LINEW64>() as u32;
                             let mut disp = 0u32;

@@ -1,5 +1,5 @@
-mod bevel;
 pub mod batch;
+mod bevel;
 mod blur;
 mod color_matrix;
 mod displacement_map;
@@ -188,47 +188,45 @@ impl<'a> FilterSource<'a> {
 
 /// AQW build: counts a filter application in the perf log (also for batched ones).
 pub fn count_filter(filter: &Filter) {
-        crate::perf_counters::inc(match filter {
-            Filter::GlowFilter(_) | Filter::GradientGlowFilter(_) => {
-                crate::perf_counters::FILTER_GLOW
+    crate::perf_counters::inc(match filter {
+        Filter::GlowFilter(_) | Filter::GradientGlowFilter(_) => crate::perf_counters::FILTER_GLOW,
+        Filter::BlurFilter(_) => crate::perf_counters::FILTER_BLUR,
+        Filter::DropShadowFilter(_) => crate::perf_counters::FILTER_SHADOW,
+        _ => crate::perf_counters::FILTER_OTHER,
+    });
+    // AQW build: what the filters look like (see `perf_counters::GLOW_Q1`).
+    {
+        use crate::perf_counters::{self as pc, inc};
+        let blur_size = |x: f32, y: f32| {
+            inc(match x.max(y) {
+                s if s <= 8.0 => pc::BLUR_SMALL,
+                s if s <= 24.0 => pc::BLUR_MID,
+                _ => pc::BLUR_BIG,
+            })
+        };
+        let glow = |passes: u8, inner_or_knockout: bool| {
+            inc(match passes {
+                0 | 1 => pc::GLOW_Q1,
+                2 => pc::GLOW_Q2,
+                _ => pc::GLOW_Q3,
+            });
+            if inner_or_knockout {
+                inc(pc::GLOW_INNER_KNOCKOUT);
             }
-            Filter::BlurFilter(_) => crate::perf_counters::FILTER_BLUR,
-            Filter::DropShadowFilter(_) => crate::perf_counters::FILTER_SHADOW,
-            _ => crate::perf_counters::FILTER_OTHER,
-        });
-        // AQW build: what the filters look like (see `perf_counters::GLOW_Q1`).
-        {
-            use crate::perf_counters::{self as pc, inc};
-            let blur_size = |x: f32, y: f32| {
-                inc(match x.max(y) {
-                    s if s <= 8.0 => pc::BLUR_SMALL,
-                    s if s <= 24.0 => pc::BLUR_MID,
-                    _ => pc::BLUR_BIG,
-                })
-            };
-            let glow = |passes: u8, inner_or_knockout: bool| {
-                inc(match passes {
-                    0 | 1 => pc::GLOW_Q1,
-                    2 => pc::GLOW_Q2,
-                    _ => pc::GLOW_Q3,
-                });
-                if inner_or_knockout {
-                    inc(pc::GLOW_INNER_KNOCKOUT);
-                }
-            };
-            match filter {
-                Filter::GlowFilter(f) => {
-                    glow(f.num_passes(), f.is_inner() || f.is_knockout());
-                    blur_size(f.blur_x.to_f32(), f.blur_y.to_f32());
-                }
-                Filter::DropShadowFilter(f) => {
-                    glow(f.num_passes(), f.is_inner() || f.is_knockout());
-                    blur_size(f.blur_x.to_f32(), f.blur_y.to_f32());
-                }
-                Filter::BlurFilter(f) => blur_size(f.blur_x.to_f32(), f.blur_y.to_f32()),
-                _ => {}
+        };
+        match filter {
+            Filter::GlowFilter(f) => {
+                glow(f.num_passes(), f.is_inner() || f.is_knockout());
+                blur_size(f.blur_x.to_f32(), f.blur_y.to_f32());
             }
+            Filter::DropShadowFilter(f) => {
+                glow(f.num_passes(), f.is_inner() || f.is_knockout());
+                blur_size(f.blur_x.to_f32(), f.blur_y.to_f32());
+            }
+            Filter::BlurFilter(f) => blur_size(f.blur_x.to_f32(), f.blur_y.to_f32()),
+            _ => {}
         }
+    }
 }
 
 pub struct Filters {

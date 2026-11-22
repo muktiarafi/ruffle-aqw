@@ -110,9 +110,14 @@ impl BevelFilter {
         }
     }
 
-    pub(crate) fn pipeline(&self, descriptors: &Descriptors, msaa_sample_count: u32) -> &wgpu::RenderPipeline {
+    pub(crate) fn pipeline(
+        &self,
+        descriptors: &Descriptors,
+        msaa_sample_count: u32,
+    ) -> &wgpu::RenderPipeline {
         self.pipeline.get_or_init(msaa_sample_count, || {
-            let _timer = crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
+            let _timer =
+                crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::PIPELINE);
             let label = create_debug_label!("Bevel Filter ({} msaa)", msaa_sample_count);
             descriptors
                 .device

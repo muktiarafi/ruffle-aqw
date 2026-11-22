@@ -226,8 +226,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             .unwrap_or_else(|| "n/a".to_string());
         let (pool_sizes, pool_textures, pool_bytes) = self.texture_pool.stats();
         let (mesh_chunks, mesh_reserved, mesh_used) = self.mesh_arena.stats();
-        let (uniform_chunks, uniform_reserved, uniform_used) =
-            self.uniform_arena.stats();
+        let (uniform_chunks, uniform_reserved, uniform_used) = self.uniform_arena.stats();
         let (cab_sizes, cab_textures, cab_bytes) = self.offscreen_texture_pool.stats();
         let mut gradient_ramps = self.gradient_cache.live().to_string();
         // AQW build: with shapes uploaded apart, the gradients are kept there (see
@@ -470,8 +469,14 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             meshes: Vec::new(),
             shape_tessellator: ShapeTessellator::new(),
             viewport_scale_factor: 1.0,
-            texture_pool: TexturePool::new_counted(crate::perf_counters::LAYER_POOL_TAKE, crate::perf_counters::LAYER_POOL_NEW),
-            offscreen_texture_pool: TexturePool::new_counted(crate::perf_counters::CACHE_POOL_TAKE, crate::perf_counters::CACHE_POOL_NEW),
+            texture_pool: TexturePool::new_counted(
+                crate::perf_counters::LAYER_POOL_TAKE,
+                crate::perf_counters::LAYER_POOL_NEW,
+            ),
+            offscreen_texture_pool: TexturePool::new_counted(
+                crate::perf_counters::CACHE_POOL_TAKE,
+                crate::perf_counters::CACHE_POOL_NEW,
+            ),
             cab_recycler: Default::default(),
             mesh_arena: crate::arena::BufferArena::new(
                 "Shape geometry",
@@ -698,11 +703,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                 let mut targets = vec![content];
                 let batched = &self.descriptors.filters.batch;
                 for (step, &kind) in signature.iter().enumerate() {
-                    let source = targets
-                        .last()
-                        .expect("the content")
-                        .color_texture()
-                        .clone();
+                    let source = targets.last().expect("the content").color_texture().clone();
                     if cb::is_blur_step(kind) {
                         let blur_slots: Vec<_> = slots
                             .iter()
@@ -910,7 +911,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             .map(|d| d.finish(vertex_base, index_base, &gradients))
             .collect();
 
-        let bytes = vertices.as_ref().map_or(0, |s| s.size()) + indices.as_ref().map_or(0, |s| s.size());
+        let bytes =
+            vertices.as_ref().map_or(0, |s| s.size()) + indices.as_ref().map_or(0, |s| s.size());
         Mesh {
             draws,
             bounds,
@@ -1073,7 +1075,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         );
 
         self.viewport_scale_factor = dimensions.scale_factor;
-        self.texture_pool = TexturePool::new_counted(crate::perf_counters::LAYER_POOL_TAKE, crate::perf_counters::LAYER_POOL_NEW);
+        self.texture_pool = TexturePool::new_counted(
+            crate::perf_counters::LAYER_POOL_TAKE,
+            crate::perf_counters::LAYER_POOL_NEW,
+        );
     }
 
     fn create_context3d(
@@ -1202,8 +1207,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     ) -> Vec<ShapeHandle> {
         use rayon::prelude::*;
         static SERIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let serial = *SERIAL
-            .get_or_init(|| std::env::var_os("RUFFLE_SERIAL_TESSELLATION").is_some());
+        let serial =
+            *SERIAL.get_or_init(|| std::env::var_os("RUFFLE_SERIAL_TESSELLATION").is_some());
         if serial || shapes.len() < 2 {
             return shapes
                 .iter()
@@ -1225,7 +1230,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let handles = meshes
             .into_iter()
             .map(|(id, bounds, lyon_mesh)| {
-                ShapeHandle(Arc::new(self.upload_shape(id, bounds, lyon_mesh, bitmap_source)))
+                ShapeHandle(Arc::new(self.upload_shape(
+                    id,
+                    bounds,
+                    lyon_mesh,
+                    bitmap_source,
+                )))
             })
             .collect();
         crate::perf_counters::add(crate::perf_counters::SHAPES_BATCHED, shapes.len() as u32);
@@ -1267,13 +1277,17 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let meshes: Vec<_> = work
             .par_iter()
             .zip(sizes.par_iter())
-            .map_init(ShapeTessellator::new, |tessellator, ((shape, scale, stretch), sizes)| {
-                let shape: DistilledShape = (*shape).into();
-                let id = shape.id;
-                let bounds = shape.shape_bounds.clone();
-                let mesh = tessellator.tessellate_shape_stretched(shape, sizes, *scale, *stretch);
-                (id, bounds, mesh)
-            })
+            .map_init(
+                ShapeTessellator::new,
+                |tessellator, ((shape, scale, stretch), sizes)| {
+                    let shape: DistilledShape = (*shape).into();
+                    let id = shape.id;
+                    let bounds = shape.shape_bounds.clone();
+                    let mesh =
+                        tessellator.tessellate_shape_stretched(shape, sizes, *scale, *stretch);
+                    (id, bounds, mesh)
+                },
+            )
             .collect();
         drop(tessellating);
         let _uploading =
@@ -1319,14 +1333,19 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     ) -> Option<ShapeHandle> {
         let shape = shape.data.downcast::<Tessellated>().ok()?;
         let start = std::time::Instant::now();
-        let Tessellated { id, bounds, mesh, .. } = *shape;
+        let Tessellated {
+            id, bounds, mesh, ..
+        } = *shape;
         let handle = ShapeHandle(Arc::new(self.upload_shape(id, bounds, mesh, bitmap_source)));
         crate::perf_counters::add(crate::perf_counters::SHAPES_RESCALED, 1);
         crate::perf_counters::add(crate::perf_counters::SHAPES_BATCHED, 1);
         let micros = start.elapsed().as_micros() as u64;
         crate::perf_counters::add(crate::perf_counters::SHAPE_REGISTER_US, micros as u32);
         crate::perf_counters::timers::add_micros(crate::perf_counters::timers::SHAPES, micros);
-        crate::perf_counters::timers::add_micros(crate::perf_counters::timers::SHAPE_UPLOAD, micros);
+        crate::perf_counters::timers::add_micros(
+            crate::perf_counters::timers::SHAPE_UPLOAD,
+            micros,
+        );
         Some(handle)
     }
 
@@ -1484,10 +1503,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             // then had to finish (~70% of 100 ms frames). Cut it into parallel segments too.
             cab_entries += 1;
             if cab_entries % CAB_ENTRIES_PER_SEGMENT == 0 {
-                crate::segments::cut_now(
-                    &self.descriptors,
-                    &mut self.active_frame.command_encoder,
-                );
+                crate::segments::cut_now(&self.descriptors, &mut self.active_frame.command_encoder);
             }
             // Periodically flush GPU work to prevent OOM when many cache entries
             // accumulate (e.g. when a large container's cacheAsBitmap is skipped
@@ -1544,7 +1560,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         if *FRESH_CACHE_POOL.get_or_init(|| std::env::var_os("RUFFLE_FRESH_CACHE_POOL").is_some()) {
             // Stock behavior, for A/B comparisons (only the pool: its layers still go into the
             // one layer cache, as they do otherwise).
-            self.offscreen_texture_pool = TexturePool::new_counted(crate::perf_counters::CACHE_POOL_TAKE, crate::perf_counters::CACHE_POOL_NEW);
+            self.offscreen_texture_pool = TexturePool::new_counted(
+                crate::perf_counters::CACHE_POOL_TAKE,
+                crate::perf_counters::CACHE_POOL_NEW,
+            );
             self.offscreen_texture_pool
                 .share_layer_cache(&self.texture_pool);
         } else {
@@ -1558,11 +1577,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.texture_pool.end_frame(240);
         // AQW build: cacheAsBitmap textures not reused within ~1 s, and within 64 MB (16 MB
         // while the GPU's memory is nearly full; Android always says so).
-        let recycle_mb = if crate::buffer_pool::MEMORY_PRESSURE.load(std::sync::atomic::Ordering::Relaxed) {
-            16
-        } else {
-            64
-        };
+        let recycle_mb =
+            if crate::buffer_pool::MEMORY_PRESSURE.load(std::sync::atomic::Ordering::Relaxed) {
+                16
+            } else {
+                64
+            };
         self.cab_recycler.end_frame(24, recycle_mb << 20);
         self.mesh_arena.end_frame();
         self.uniform_arena.end_frame();
@@ -1603,7 +1623,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             })
             .ok_or(BitmapError::TooLarge)?;
 
-        let _upload_timer = crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::UPLOAD);
+        let _upload_timer =
+            crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::UPLOAD);
         self.descriptors.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -1622,7 +1643,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         let handle = BitmapHandle(Arc::new(Texture {
             recycle: None,
-            live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
+            _live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
             texture,
             repeating_linear: Default::default(),
             repeating_nearest: Default::default(),
@@ -1668,7 +1689,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         };
 
         self.active_frame.submit_direct(&self.descriptors);
-        let _upload_timer = crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::UPLOAD);
+        let _upload_timer =
+            crate::perf_counters::timers::Scoped::new(crate::perf_counters::timers::UPLOAD);
         self.descriptors.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture.texture,
@@ -1912,7 +1934,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     });
                 BitmapHandle(Arc::new(Texture {
                     recycle: None,
-                    live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
+                    _live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
                     texture,
                     repeating_linear: Default::default(),
                     repeating_nearest: Default::default(),
@@ -2087,7 +2109,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         };
         Ok(BitmapHandle(Arc::new(Texture {
             recycle: Some(self.cab_recycler.clone()),
-            live: Some(crate::perf_counters::LiveBitmap::new_cab(&texture)),
+            _live: Some(crate::perf_counters::LiveBitmap::new_cab(&texture)),
             texture,
             repeating_linear: Default::default(),
             repeating_nearest: Default::default(),
@@ -2267,7 +2289,7 @@ pub(crate) fn empty_texture_apart(
         (!crate::aqw_out_of_memory(scope)).then_some(texture)
     })?;
     Some(BitmapHandle(Arc::new(Texture {
-        live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
+        _live: Some(crate::perf_counters::LiveBitmap::new(&texture)),
         texture,
         repeating_linear: Default::default(),
         repeating_nearest: Default::default(),
@@ -2417,17 +2439,30 @@ impl ActiveFrame {
             // Turu: in batches (see `segments::SEGMENTS_PER_SUBMIT`).
             Some(uploads) => crate::segments::finish_in_batches(
                 descriptors,
-                crate::shape_uploads::ahead_of(Some(uploads), crate::segments::take_all(draw_encoder)),
+                crate::shape_uploads::ahead_of(
+                    Some(uploads),
+                    crate::segments::take_all(draw_encoder),
+                ),
             ),
             None => crate::segments::finish_all(descriptors, draw_encoder),
         });
         let index = timers::time(timers::SUBMIT, || {
             // AQW build: (with the render thread: see `render_thread::submitting`.)
             let _gate = crate::render_thread::submitting();
-            target.submit(&descriptors.device, &descriptors.queue, command_buffers, frame)
+            target.submit(
+                &descriptors.device,
+                &descriptors.queue,
+                command_buffers,
+                frame,
+            )
         });
         self.staging_belt.recall();
-        Self::limit_in_flight(descriptors, &self.in_flight, index.clone(), timers::GPU_WAIT);
+        Self::limit_in_flight(
+            descriptors,
+            &self.in_flight,
+            index.clone(),
+            timers::GPU_WAIT,
+        );
         Some(index)
     }
 
@@ -2480,7 +2515,10 @@ impl ActiveFrame {
             // Turu: in batches (see `segments::SEGMENTS_PER_SUBMIT`).
             Some(uploads) => crate::segments::finish_in_batches(
                 descriptors,
-                crate::shape_uploads::ahead_of(Some(uploads), crate::segments::take_all(draw_encoder)),
+                crate::shape_uploads::ahead_of(
+                    Some(uploads),
+                    crate::segments::take_all(draw_encoder),
+                ),
             ),
             None => crate::segments::finish_all(descriptors, draw_encoder),
         };
@@ -2567,7 +2605,15 @@ impl BackgroundShapes {
                     .tessellate_shape_stretched(distilled, &sizes, scale, stretch);
                 let micros = start.elapsed().as_micros() as u64;
                 // (The receiver is gone only when the backend is.)
-                let _ = done.send((ticket, Tessellated { id, bounds, mesh, micros }));
+                let _ = done.send((
+                    ticket,
+                    Tessellated {
+                        id,
+                        bounds,
+                        mesh,
+                        micros,
+                    },
+                ));
             });
         }
         Vec::new()
@@ -2589,7 +2635,12 @@ impl BackgroundShapes {
             running.remove(&ticket);
             let (micros, (vertices, indices)) = (shape.micros, shape.size());
             let data = Box::new(shape);
-            let shape = ruffle_render::backend::TessellatedShape { data, micros, vertices, indices };
+            let shape = ruffle_render::backend::TessellatedShape {
+                data,
+                micros,
+                vertices,
+                indices,
+            };
             done.push((ticket, shape));
         };
         while let Ok(received) = shapes.receiver.try_recv() {
@@ -2695,7 +2746,15 @@ mod background_shapes_tests {
             draws: Vec::new(),
             gradients: Vec::new(),
         };
-        (ticket, Tessellated { id: 0, bounds: Default::default(), mesh, micros: 0 })
+        (
+            ticket,
+            Tessellated {
+                id: 0,
+                bounds: Default::default(),
+                mesh,
+                micros: 0,
+            },
+        )
     }
 
     fn running(tickets: std::ops::Range<u64>) -> BackgroundShapes {
@@ -2791,6 +2850,10 @@ mod background_shapes_tests {
         let done = shapes.collect(None, &all, &[]);
         assert_eq!(done.len() as u64, COUNT);
         assert!(shapes.running.is_empty());
-        assert!(start.elapsed() < Duration::from_secs(10), "took {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 }

@@ -464,7 +464,10 @@ pub trait TInteractiveObject<'gc>:
                 let this = self.as_displayobject();
                 if this.parent().is_none() && this.as_stage().is_none() {
                     let chain = activation.context.mouse_data.aqw_rollout_chain.clone();
-                    if chain.first().is_some_and(|first| DisplayObject::ptr_eq(*first, this)) {
+                    if chain
+                        .first()
+                        .is_some_and(|first| DisplayObject::ptr_eq(*first, this))
+                    {
                         let mut to_chain = Vec::new();
                         let mut node = Some(
                             to.map(|t| t.as_displayobject())

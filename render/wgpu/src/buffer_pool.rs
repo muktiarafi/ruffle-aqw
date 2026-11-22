@@ -115,7 +115,11 @@ fn idle_budget(integrated: bool) -> u64 {
     let limit = limit << 20;
     if MEMORY_PRESSURE.load(Ordering::Relaxed) {
         let pressure = PRESSURE_MB << 20;
-        if limit == 0 { pressure } else { limit.min(pressure) }
+        if limit == 0 {
+            pressure
+        } else {
+            limit.min(pressure)
+        }
     } else {
         limit
     }
@@ -192,26 +196,29 @@ impl TexturePool {
             } else {
                 None
             };
-            (BufferPool::new(Box::new(move |descriptors, _description| {
-                let _timer = crate::perf_counters::timers::Scoped::new(
-                    crate::perf_counters::timers::TEXTURE_CREATE,
-                );
-                // AQW build: pooled textures come and go; they get GPU memory of their own.
-                let texture = crate::texture_kind(crate::TRANSIENT_TEXTURES, || {
-                    descriptors.device.create_texture(&wgpu::TextureDescriptor {
-                        label: label.as_deref(),
-                        size,
-                        mip_level_count: 1,
-                        sample_count,
-                        dimension: wgpu::TextureDimension::D2,
-                        format,
-                        view_formats: &[format],
-                        usage,
-                    })
-                });
-                let view = texture.create_view(&Default::default());
-                (texture, view)
-            })), 0)
+            (
+                BufferPool::new(Box::new(move |descriptors, _description| {
+                    let _timer = crate::perf_counters::timers::Scoped::new(
+                        crate::perf_counters::timers::TEXTURE_CREATE,
+                    );
+                    // AQW build: pooled textures come and go; they get GPU memory of their own.
+                    let texture = crate::texture_kind(crate::TRANSIENT_TEXTURES, || {
+                        descriptors.device.create_texture(&wgpu::TextureDescriptor {
+                            label: label.as_deref(),
+                            size,
+                            mip_level_count: 1,
+                            sample_count,
+                            dimension: wgpu::TextureDimension::D2,
+                            format,
+                            view_formats: &[format],
+                            usage,
+                        })
+                    });
+                    let view = texture.create_view(&Default::default());
+                    (texture, view)
+                })),
+                0,
+            )
         });
         *last_used = frame;
         if let Some((take_counter, new_counter)) = self.counters {

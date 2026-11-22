@@ -105,14 +105,13 @@ impl GuiController {
             #[cfg(windows)]
             crate::windows::test_native_crash();
             let surface = instance.create_surface(window.clone())?;
-            let (adapter, device, queue) =
-                futures::executor::block_on(request_adapter_and_device(
-                    backend,
-                    &instance,
-                    Some(&surface),
-                    preferences.graphics_power_preference().into(),
-                ))
-                .map_err(|e| anyhow!(e.to_string()))?;
+            let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
+                backend,
+                &instance,
+                Some(&surface),
+                preferences.graphics_power_preference().into(),
+            ))
+            .map_err(|e| anyhow!(e.to_string()))?;
             Ok((instance, surface, adapter, device, queue))
         };
         // AQW build: DirectX 12 is the default on Windows. Where it is there but cannot be
@@ -142,9 +141,9 @@ impl GuiController {
         if !off.is_empty() {
             tracing::info!("Drawing speed-ups switched off: {off:?}");
         }
-        ruffle_render_wgpu::set_transient_textures_enabled(
-            !crate::mugetsu::exe_flag("no-transient-memory"),
-        );
+        ruffle_render_wgpu::set_transient_textures_enabled(!crate::mugetsu::exe_flag(
+            "no-transient-memory",
+        ));
         tracing::info!(
             "Using graphics API {} on {} (type: {:?})",
             adapter_info.backend.to_str(),
@@ -573,7 +572,11 @@ impl GuiController {
             let Some(state) = render_thread::target_state::<MovieView>(player.renderer()) else {
                 return fresh(player);
             };
-            if self.movie_binds.as_ref().is_none_or(|(known, _)| *known != state) {
+            if self
+                .movie_binds
+                .as_ref()
+                .is_none_or(|(known, _)| *known != state)
+            {
                 let binds = fresh(player)?;
                 // (Reading it counted as a change of state itself.)
                 let state = render_thread::target_state::<MovieView>(player.renderer())?;
@@ -802,12 +805,7 @@ fn present_frame(
     let mut egui_renderer = lock(egui_renderer);
     for (id, image_deltas) in frame.textures_delta.set.drain() {
         for image_delta in &image_deltas {
-            egui_renderer.update_texture(
-                &descriptors.device,
-                &descriptors.queue,
-                id,
-                image_delta,
-            );
+            egui_renderer.update_texture(&descriptors.device, &descriptors.queue, id, image_delta);
         }
     }
     let mut slot = lock(surface);
@@ -908,7 +906,11 @@ fn present_frame(
             crate::gui::movie::blit(movie_view_renderer, movie, &mut render_pass);
         }
 
-        egui_renderer.render(&mut render_pass, &frame.primitives, &frame.screen_descriptor);
+        egui_renderer.render(
+            &mut render_pass,
+            &frame.primitives,
+            &frame.screen_descriptor,
+        );
 
         #[cfg(feature = "tracy_images")]
         {
@@ -943,7 +945,9 @@ fn free_textures(egui_renderer: &mut egui_wgpu::Renderer, frame: &mut GuiFrame) 
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn load_system_fonts(
@@ -1174,7 +1178,11 @@ fn fps_counter(ctx: &egui::Context, top: f64) -> usize {
     let text = format!("{fps:.0} FPS");
     let origin = pos2(8.0, top as f32 / ctx.pixels_per_point() + 8.0);
     let painter = ctx.layer_painter(LayerId::new(Order::Background, Id::new("mugetsu_fps")));
-    let galley = painter.layout_no_wrap(text, FontId::monospace(12.0), Color32::from_rgb(232, 234, 242));
+    let galley = painter.layout_no_wrap(
+        text,
+        FontId::monospace(12.0),
+        Color32::from_rgb(232, 234, 242),
+    );
     let badge = Rect::from_min_size(origin, galley.size() + vec2(22.0, 8.0));
     let dot = if fps >= 50.0 {
         Color32::from_rgb(124, 220, 140)
@@ -1183,8 +1191,16 @@ fn fps_counter(ctx: &egui::Context, top: f64) -> usize {
     } else {
         Color32::from_rgb(240, 120, 110)
     };
-    painter.rect_filled(badge, CornerRadius::same(7), Color32::from_rgba_premultiplied(14, 16, 22, 200));
+    painter.rect_filled(
+        badge,
+        CornerRadius::same(7),
+        Color32::from_rgba_premultiplied(14, 16, 22, 200),
+    );
     painter.circle_filled(pos2(badge.left() + 9.0, badge.center().y), 3.0, dot);
-    painter.galley(badge.left_top() + vec2(16.0, 4.0), galley, Color32::from_rgb(232, 234, 242));
+    painter.galley(
+        badge.left_top() + vec2(16.0, 4.0),
+        galley,
+        Color32::from_rgb(232, 234, 242),
+    );
     3
 }
