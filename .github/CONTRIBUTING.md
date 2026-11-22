@@ -26,8 +26,10 @@ and tests the result.
 - **Keep changes small and marked.** Every Turu commit has to be re-applied when `aqw` moves to
   a newer Ruffle, so touch as few upstream lines as you can, and put new code in new files where
   possible (`core/src/aqw_*.rs`).
-- **Don't reformat.** Mugetsu's patched files aren't rustfmt-clean, and reformatting them makes
-  every update conflict. Format only the lines you write.
+- **Format everything.** The workspace with `cargo fmt --all`, and each crate in `patches/` with
+  `rustfmt --edition <its edition> patches/<crate>/src/lib.rs` (CI's Format job). Mugetsu's
+  patched files are formatted too (since 5885b04f0), so an update formats them again right after
+  re-applying Mugetsu (below); Turu's commits, written on formatted code, then apply on top.
 - **Patched crates** live in `patches/` and are wired up by `[patch.crates-io]` in `Cargo.toml`.
   Turu's root `Cargo.toml` repeats that section: change both.
 - **Commits** follow `type: Summary` (`feat:`, `fix:`, `perf:`, `chore:`), as in the history.
@@ -49,6 +51,7 @@ must pass:
 | Job | What |
 |---|---|
 | Rebased on aqw | the branch contains `aqw`, no merge commits |
+| Format | `cargo fmt --all --check`, and rustfmt over each crate in `patches/` |
 | Check | `cargo check` of the crates Turu uses, with its features, and the desktop frontend |
 
 Ruffle's own workflows (tests, lint, web) run only for `master`. Run the tests your change
@@ -57,7 +60,9 @@ ran.
 
 ## Updating to a newer Ruffle or Mugetsu
 
-Maintainers only: Mugetsu is re-applied on the new Ruffle, then Turu's commits on top, and `aqw`
+Maintainers only: Mugetsu is re-applied on the new Ruffle and formatted in a commit of its own
+(as in Rules, "Format everything"; leave out the old `style:` formatting commit), then Turu's
+commits go on top, and `aqw`
 is replaced (a force-push) and tagged. Open pull requests then need a rebase onto the new `aqw`.
 Turu's [CLAUDE.md](https://github.com/muktiarafi/turu/blob/main/CLAUDE.md) describes the steps on
 Turu's side.

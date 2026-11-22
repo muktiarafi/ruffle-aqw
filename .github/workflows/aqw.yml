@@ -1,10 +1,10 @@
 name: AQW
 
 # Turu's checks for the `aqw` branch (Ruffle with Mugetsu's AQW patches). Ruffle's own workflows
-# run only for `master`. This checks that a pull request is rebased on `aqw` and that the crates
-# Turu builds against still compile with Turu's features; Turu's CI runs the full app and tests
-# when its `ruffle/` submodule is bumped. Branch protection on `aqw` requires both jobs
-# (.github/CONTRIBUTING.md).
+# run only for `master`. This checks that a pull request is rebased on `aqw`, that the code is
+# formatted and that the crates Turu builds against still compile with Turu's features; Turu's
+# CI runs the full app and tests, failing on any warning, when its `ruffle/` submodule is bumped.
+# Branch protection on `aqw` requires these jobs (.github/CONTRIBUTING.md).
 on:
   pull_request:
     branches: [aqw]
@@ -49,6 +49,28 @@ jobs:
             exit 1
           fi
           echo "Rebased on $BASE: $(git rev-list --count "origin/$BASE..HEAD") commit(s) on top"
+
+  # Mugetsu's and Turu's changes are formatted like Ruffle's own code. The patched crates in
+  # patches/ are outside the workspace, so rustfmt formats each at its own edition.
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check the workspace's formatting
+        run: cargo fmt --all --check
+
+      - name: Check the patched crates' formatting
+        run: |
+          for crate in patches/*/; do
+            edition=$(sed -n 's/^edition = "\(.*\)"/\1/p' "$crate/Cargo.toml" | head -1)
+            rustfmt --edition "$edition" --check "$crate/src/lib.rs"
+          done
 
   check:
     name: Check
