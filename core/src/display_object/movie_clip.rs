@@ -970,7 +970,8 @@ impl<'gc> MovieClip<'gc> {
     /// This is treated as an 'explicit' goto: frame scripts and other frame
     /// lifecycle events will be retriggered.
     pub fn goto_frame(self, context: &mut UpdateContext<'gc>, goto_info: GotoInfo) {
-        self.unsettle();
+        // Turu: unsettled where a goto can give the clip work (`goto_frame_now`, the queued
+        // goto below), not up front: a no-op goto leaves it settled.
         self.wake();
         // Clamp frame number in bounds.
         let goto_info = GotoInfo {
@@ -1008,7 +1009,6 @@ impl<'gc> MovieClip<'gc> {
     }
 
     fn goto_frame_now(self, context: &mut UpdateContext<'gc>, goto_info: GotoInfo) {
-        self.unsettle();
         self.wake();
         match goto_info.stop_or_play {
             StopOrPlay::Stop => self.stop(context),
@@ -1018,9 +1018,23 @@ impl<'gc> MovieClip<'gc> {
         // In AS3, no-op gotos have side effects that are visible to user
         // code. Hence, we have to run them anyway.
         if goto_info.frame != self.current_frame() {
+            self.unsettle();
             self.run_goto(context, goto_info.frame, false);
         } else {
+            // Turu: a no-op goto keeps the clip settled (`display_object::settle`). It only
+            // clears `queued_goto` and stops or plays: no construction or frame script to run
+            // (`settle_conditions`), and playing is `enter_frame`'s (woken above). Unsettling
+            // it sent the nested walks of `run_inner_goto_frame` down to the clip again each
+            // time: AQW's `enterFrame` handlers do this to clips already on that frame every
+            // frame (docs/HEADLESS_MONITORING_HANDOFF.md, "CPU").
             self.no_op_goto(context);
+            // The lean walks' check: a clip that stays settled still meets the conditions.
+            if settle::lean_verify()
+                && self.base().settled.is_marked()
+                && !self.settle_conditions(|clip| clip.base().settled.is_marked())
+            {
+                settle::violation("no-op goto", "it is not settled any more", self.describe());
+            }
         }
     }
 
