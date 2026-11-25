@@ -170,4 +170,90 @@ impl Player {
             })
         })
     }
+
+    /// Sets the transform of every object `path` reaches, as AS3's `transform.matrix = ...`
+    /// would (the timeline no longer moves it): `(a, b, c, d, tx, ty)`, tx and ty in pixels.
+    /// How many it reached. Posing an avatar: a game animation's frame copied part by part.
+    pub fn set_matrix_at(
+        &mut self,
+        path: &str,
+        (a, b, c, d, tx, ty): (f32, f32, f32, f32, f64, f64),
+    ) -> usize {
+        let path = segments(path);
+        self.mutate_with_update_context(|context| {
+            let Some(root) = context.stage.root_clip() else {
+                return 0;
+            };
+            let mut found = Vec::new();
+            matching(root, &path, &mut found);
+            for object in &found {
+                object.set_matrix(Matrix {
+                    a,
+                    b,
+                    c,
+                    d,
+                    tx: Twips::from_pixels(tx),
+                    ty: Twips::from_pixels(ty),
+                });
+                object.set_transformed_by_script(true);
+                if let Some(parent) = object.parent() {
+                    parent.invalidate_cached_bitmap();
+                }
+            }
+            found.len()
+        })
+    }
+
+    /// Restacks the children of the first object `path` reaches: those named in `names` are
+    /// put in that order, back to front, in the slots they already hold (other children stay
+    /// where they are). How many it moved into place. Posing an avatar: a game animation's
+    /// frame stacks the parts its own way (the weapon behind the head in a salute).
+    pub fn order_children_at(&mut self, path: &str, names: &[&str]) -> usize {
+        let path = segments(path);
+        self.mutate_with_update_context(|context| {
+            let Some(root) = context.stage.root_clip() else {
+                return 0;
+            };
+            let mut found = Vec::new();
+            matching(root, &path, &mut found);
+            let Some(mut container) = found.first().and_then(|object| object.as_container()) else {
+                return 0;
+            };
+            let name_of = |object: DisplayObject<'_>| object.name().map(|n| n.to_string());
+            // The render-list slots the named children hold, in order, and the order they
+            // should be in.
+            let children: Vec<_> = container.iter_render_list().collect();
+            let slots: Vec<usize> = children
+                .iter()
+                .enumerate()
+                .filter(|(_, child)| name_of(**child).is_some_and(|n| names.contains(&n.as_str())))
+                .map(|(index, _)| index)
+                .collect();
+            let wanted: Vec<String> = names
+                .iter()
+                .filter(|name| {
+                    children
+                        .iter()
+                        .any(|child| name_of(*child).as_deref() == Some(**name))
+                })
+                .map(|name| (*name).to_owned())
+                .collect();
+            // Fill the slots front to back, swapping the wanted child into each.
+            for (slot, name) in slots.iter().zip(&wanted) {
+                let current: Vec<_> = container.iter_render_list().collect();
+                let Some(from) = current
+                    .iter()
+                    .position(|child| name_of(*child).as_deref() == Some(name))
+                else {
+                    continue;
+                };
+                if from != *slot {
+                    container.swap_at_index(context, from, *slot);
+                }
+            }
+            let root_object: DisplayObject<'_> = container.into();
+            root_object.invalidate_cached_bitmap();
+            wanted.len()
+        })
+    }
 }
