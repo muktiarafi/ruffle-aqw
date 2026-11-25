@@ -30,6 +30,8 @@ extern crate num_derive;
 mod aqw_retention;
 #[cfg(test)]
 mod aqw_bench;
+// Turu (charpage-api): instance-name paths into the display list, for frontends.
+mod aqw_display_tools;
 mod avm1;
 mod avm2;
 mod avm_rng;
@@ -75,6 +77,7 @@ pub mod external;
 pub mod i18n;
 pub mod stub;
 
+pub use aqw_display_tools::Drawing;
 pub use context_menu::ContextMenuItem;
 pub use events::PlayerEvent;
 pub use indexmap;
