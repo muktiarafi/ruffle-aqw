@@ -914,18 +914,23 @@ pub(crate) fn release_gpu_memory(descriptors: &descriptors::Descriptors) {
 /// work that used it are logged instead of fatal too: at worst a frame misses something. Any
 /// other error is still fatal, as before.
 pub(crate) mod gpu_oom {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     static PENDING: AtomicBool = AtomicBool::new(false);
+    /// Turu (charpage-api): which device the handlers are for. A frontend that opens a new
+    /// device after a loss gets a working renderer again, and the old device's late callback
+    /// (when it's dropped) can't mark the new one lost.
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     static LOGGED: AtomicU32 = AtomicU32::new(0);
     /// Why the device was lost, once it was.
     static LOST: Mutex<Option<String>> = Mutex::new(None);
 
     /// Why the GPU device was lost ("Unknown: ..."), or `None` while it works. Once lost, it
-    /// stays lost: frames aren't drawn and GPU errors are tolerated.
+    /// stays lost: frames aren't drawn and GPU errors are tolerated, until a new device is
+    /// opened (`request_adapter_and_device`).
     pub fn device_lost() -> Option<String> {
         LOST.lock().ok().and_then(|lost| lost.clone())
     }
@@ -934,11 +939,20 @@ pub(crate) mod gpu_oom {
     const TOLERANCE: Duration = Duration::from_secs(3);
 
     pub fn install_error_handler(device: &wgpu::Device) {
+        // Turu (charpage-api): a new device starts out working.
+        let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Ok(mut lost) = LOST.lock() {
+            *lost = None;
+        }
         // AQW build: the GPU can drop the device (wgpu loses it when the driver runs out of
         // memory, on phones with 4 GB). Nothing drawn after that shows, but the game and its
         // scripts keep running: remember it, so the app stops drawing and tells the user, and
         // tolerate the errors of the work still sent to the dead device.
-        device.set_device_lost_callback(|reason, message| {
+        device.set_device_lost_callback(move |reason, message| {
+            // Turu (charpage-api): only the newest device's loss counts.
+            if GENERATION.load(Ordering::SeqCst) != generation {
+                return;
+            }
             // Inside wgpu, possibly with its locks held: only remember it.
             if let Ok(mut lost) = LOST.lock()
                 && lost.is_none()

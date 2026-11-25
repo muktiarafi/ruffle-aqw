@@ -24,6 +24,8 @@ pub struct Drawing {
     /// Where the object's own (0, 0) is in the picture, in pixels: a fixed point to place
     /// drawings of different sizes by (an avatar's is at its feet).
     pub origin: (f64, f64),
+    /// The scale it was drawn at: the one asked for, or less to fit `max_side`.
+    pub scale: f64,
 }
 
 /// The objects under `object` (itself included) that `path` reaches.
@@ -110,9 +112,9 @@ impl Player {
     /// (in its own coordinates, without its parents' transforms, visible or not), at `scale`,
     /// into a transparent picture the size of its bounds plus `pad` pixels around. `None` if
     /// nothing matched or it has no size.
-    pub fn draw_at(&mut self, path: &str, scale: f64, pad: u32) -> Option<Drawing> {
-        /// Past this, a picture isn't worth the memory (a misplaced part's bounds).
-        const MAX_SIDE: f64 = 8192.0;
+    /// No side is longer than `max_side` pixels: a bigger object is drawn at a smaller scale.
+    /// (One huge drawing can take the GPU long enough for the system to reset it.)
+    pub fn draw_at(&mut self, path: &str, scale: f64, pad: u32, max_side: u32) -> Option<Drawing> {
         let path = segments(path);
         self.mutate_with_update_context(|context| {
             let root = context.stage.root_clip()?;
@@ -121,9 +123,18 @@ impl Player {
             let object = *found.first()?;
             let bounds = object.bounds(BoundsMode::Engine);
             let (x_min, y_min) = (bounds.x_min.to_pixels(), bounds.y_min.to_pixels());
-            let width = (bounds.x_max.to_pixels() - x_min) * scale + f64::from(2 * pad);
-            let height = (bounds.y_max.to_pixels() - y_min) * scale + f64::from(2 * pad);
-            if !(1.0..=MAX_SIDE).contains(&width) || !(1.0..=MAX_SIDE).contains(&height) {
+            let (object_width, object_height) = (
+                bounds.x_max.to_pixels() - x_min,
+                bounds.y_max.to_pixels() - y_min,
+            );
+            if object_width <= 0.0 || object_height <= 0.0 {
+                return None;
+            }
+            let room = f64::from(max_side.saturating_sub(2 * pad).max(1));
+            let scale = scale.min(room / object_width).min(room / object_height);
+            let width = object_width * scale + f64::from(2 * pad);
+            let height = object_height * scale + f64::from(2 * pad);
+            if width < 1.0 || height < 1.0 {
                 return None;
             }
             let (width, height) = (width.ceil() as u32, height.ceil() as u32);
@@ -167,6 +178,7 @@ impl Player {
                     -x_min * scale + f64::from(pad),
                     -y_min * scale + f64::from(pad),
                 ),
+                scale,
             })
         })
     }
