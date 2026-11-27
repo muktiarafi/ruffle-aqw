@@ -868,7 +868,7 @@ pub(crate) fn aqw_out_of_memory(scope: wgpu::ErrorScopeGuard) -> bool {
     out_of_memory
 }
 
-fn pop_scope(scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
+pub(crate) fn pop_scope(scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
     let future = std::pin::pin!(scope.pop());
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     match std::future::Future::poll(future, &mut context) {

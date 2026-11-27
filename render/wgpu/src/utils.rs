@@ -245,7 +245,9 @@ pub fn capture_image<R, F: FnOnce(&[u8], u32) -> R>(
     // panicking: once the GPU dropped the device (`crate::device_lost`), the copy's submission
     // failed, so waiting for it gave `WrongSubmissionIndex`, and its mapping may never finish
     // (waiting for it would hang the player).
+    // Turu: and the buffer lets go of its mapping, whatever became of it (`release_mapping`).
     let empty = |with_rgba: F| {
+        release_mapping(device, buffer);
         let empty = vec![0; dimensions.padded_bytes_per_row as usize * dimensions.height];
         with_rgba(&empty, dimensions.padded_bytes_per_row)
     };
@@ -273,6 +275,19 @@ pub fn capture_image<R, F: FnOnce(&[u8], u32) -> R>(
     drop(map);
     buffer.unmap();
     result
+}
+
+/// Turu: lets go of `buffer`'s mapping, whatever became of it: a map still pending is aborted,
+/// a mapped buffer unmapped, and one not mapped (its map failed) left as it is. The buffers read
+/// back come from a pool (`offscreen_buffer_pool`), and one handed back with its map pending or
+/// done (the read gave up, or its range couldn't be had) made the next copy into it fail in
+/// `Queue::submit` ("Buffer with '' label is still mapped", Sentry TURU-ANDROID-7), which wgpu's
+/// error handler makes a panic. Unmapping a buffer that isn't mapped is a validation error too,
+/// so this catches its own.
+pub(crate) fn release_mapping(device: &wgpu::Device, buffer: &wgpu::Buffer) {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    buffer.unmap();
+    let _ = crate::pop_scope(scope);
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -553,6 +568,56 @@ mod tests {
         );
         let error = futures::executor::block_on(scope.pop());
         assert!(error.is_some(), "the buffer should have failed");
+    }
+
+    /// A buffer read back gives up its mapping however far the map got (TURU-ANDROID-7): with its
+    /// map still pending, the next copy into it was "still mapped" in `Queue::submit`; after
+    /// `release_mapping` it goes through. And a buffer that isn't mapped is left so without an
+    /// error.
+    #[test]
+    fn a_buffer_given_up_takes_the_next_copy() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let source = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let target = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let copy = |device: &wgpu::Device| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(&source, 0, &target, 0, 8);
+            queue.submit([encoder.finish()]);
+            futures::executor::block_on(scope.pop())
+        };
+
+        // As before the fix: the map left pending makes the copy fail.
+        target.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        assert!(
+            copy(&device).is_some(),
+            "a pending map should block the copy"
+        );
+
+        // Given up as `capture_image` now does: the copy goes through.
+        super::release_mapping(&device, &target);
+        assert!(
+            copy(&device).is_none(),
+            "the released buffer should take the copy"
+        );
+
+        // Not mapped at all (a map that failed): no error escapes.
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        super::release_mapping(&device, &target);
+        assert!(futures::executor::block_on(scope.pop()).is_none());
     }
 
     /// On a lost device, polling doesn't panic (the wgpu-core patch) and reading a texture back
