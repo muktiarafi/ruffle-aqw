@@ -4,12 +4,13 @@ name: AQW
 # run only for `master`. This checks that a pull request is rebased on `aqw`, that the code is
 # formatted and that the crates Turu builds against still compile with Turu's features; Turu's
 # CI runs the full app and tests, failing on any warning, when its `ruffle/` submodule is bumped.
-# Branch protection on `aqw` requires these jobs (.github/CONTRIBUTING.md).
+# Branch protection on `aqw` and on each frozen base's `aqw-*` line requires these jobs
+# (.github/CONTRIBUTING.md, "Branches and tags"); a backport to a frozen line is checked too.
 on:
   pull_request:
-    branches: [aqw]
+    branches: [aqw, "aqw-*"]
   push:
-    branches: [aqw]
+    branches: [aqw, "aqw-*"]
   workflow_dispatch:
 
 permissions:
@@ -34,6 +35,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # Only the pull request's own commits: `aqw`'s one merge per base (CONTRIBUTING.md,
+      # "Updating") is pushed by a maintainer, not through a pull request.
       - name: Check the branch is rebased on aqw, without merge commits
         env:
           BASE: ${{ github.event.pull_request.base.ref }}
