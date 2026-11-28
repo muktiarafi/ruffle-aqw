@@ -106,6 +106,38 @@ impl<'gc, V> PropertyMap<'gc, V> {
             .flat_map(|(k, vs)| vs.iter().map(|(ns, v)| (*k, *ns, v)))
     }
 
+    /// AQW build: traces every name, and the values `trace_value` accepts (see
+    /// `Domain::aqw_skip_movies`).
+    pub fn aqw_trace_where<C: gc_arena::collect::Trace<'gc>>(
+        &self,
+        cc: &mut C,
+        trace_value: impl Fn(&V) -> bool,
+    ) where
+        V: Collect<'gc>,
+    {
+        for (name, values) in self.0.iter() {
+            cc.trace(name);
+            for (ns, value) in values.iter() {
+                cc.trace(ns);
+                if trace_value(value) {
+                    cc.trace(value);
+                }
+            }
+        }
+    }
+
+    /// AQW build: keeps only the entries whose value `keep` accepts; how many went.
+    pub fn aqw_retain(&mut self, keep: impl Fn(&V) -> bool) -> usize {
+        let mut removed = 0;
+        for values in self.0.values_mut() {
+            let before = values.len();
+            values.retain(|(_, value)| keep(value));
+            removed += before - values.len();
+        }
+        self.0.retain(|_, values| !values.is_empty());
+        removed
+    }
+
     pub fn insert(&mut self, name: QName<'gc>, value: V) -> Option<V> {
         let bucket = self.0.entry(name.local_name()).or_default();
 

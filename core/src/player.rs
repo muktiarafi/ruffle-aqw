@@ -1131,6 +1131,62 @@ impl Player {
         }
     }
 
+    /// Turu: logs what keeps up to `max_targets` loaded movies whose URL contains `url_part`
+    /// alive (their libraries are freed only once the movie isn't reached: see
+    /// `Library::sweep_movie_libraries`), to find why a busy map's gear stays loaded. Walks the
+    /// whole heap once, so it takes a moment.
+    pub fn log_movie_retention(&mut self, url_part: &str, max_targets: usize) {
+        let (live, targets): (usize, Vec<*const ()>) = self.mutate_with_update_context(|context| {
+            let mut found: Vec<(String, *const ())> = context
+                .library
+                .known_movies()
+                .filter(|movie| movie.url().contains(url_part))
+                .map(|movie| (movie.url().to_owned(), movie.as_ptr() as *const ()))
+                .collect();
+            // (In URL order, so the picks are spread out rather than the hash map's order.)
+            found.sort();
+            let n = found.len();
+            let mut picked: Vec<_> = (0..max_targets)
+                .map(|i| i * n / max_targets.max(1))
+                .filter(|&i| i < n)
+                .map(|i| found[i].1)
+                .collect();
+            picked.dedup();
+            (n, picked)
+        });
+        tracing::warn!(
+            target: "ruffle_aqw_perf",
+            "movie retention: {live} loaded movies matching {url_part:?}"
+        );
+        if targets.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        // (Each library holds its own movie: set them aside, as the libraries' test does, to
+        // see what else holds it.)
+        let set_aside = self.mutate_with_update_context(|context| {
+            context.library.aqw_set_aside_libraries(true, &[])
+        });
+        let paths = self
+            .gc_arena
+            .borrow()
+            .mutate(|_, root| crate::aqw_retention::retention_paths(root, &targets));
+        self.mutate_with_update_context(|context| {
+            context.library.aqw_set_aside_libraries(false, &set_aside)
+        });
+        tracing::warn!(
+            target: "ruffle_aqw_perf",
+            "retention report for {} movies ({:.0} ms):",
+            targets.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        for (i, path) in paths.iter().enumerate() {
+            for (depth, line) in path.iter().enumerate() {
+                tracing::warn!(target: "ruffle_aqw_perf", "  #{i} {depth:>3}: {line}");
+            }
+        }
+    }
+
     /// Turu: a loaded movie whose URL `matches` (see `Library::loaded_movie`).
     pub fn loaded_movie(
         &mut self,
@@ -1180,6 +1236,8 @@ impl Player {
         let movies =
             self.mutate_with_update_context(|context| context.library.loaded_movie_count());
         let freed = self.mutate_with_update_context(|context| context.library.freed_movie_count());
+        let freed_gear =
+            self.mutate_with_update_context(|context| context.library.freed_gear_count());
         let (_, urls, total, distinct) =
             self.mutate_with_update_context(|context| context.library.movie_data_stats());
         let (parsed, shared) = crate::display_object::graphic::shared_shapes::counts();
@@ -1197,7 +1255,7 @@ impl Player {
             crate::frame_lifecycle::early_scripts::marks();
         const MB: f64 = 1024.0 * 1024.0;
         format!(
-            "{movies} loaded SWFs ({freed} freed so far, {tested} tested, {in_use} found in use; {urls} distinct URLs; SWF data {:.0} MB, {:.0} MB distinct; shape tags parsed {parsed}, shared {shared}), {gc_objects} GC objects ({cycles} GC cycles, longest step at a cycle's end {:.1} ms); frame scripts run early {early_scripts} in {early_runs} goes ({early_walks} looks, {:.0} ms in all; asked for in the script phase {marks_scripts}, the exit phase {marks_exit}, between frames {marks_idle}), clips drawn before theirs {drawn_waiting}",
+            "{movies} loaded SWFs ({freed} freed so far, {tested} tested, {in_use} found in use, {freed_gear} gear out of a domain in use; {urls} distinct URLs; SWF data {:.0} MB, {:.0} MB distinct; shape tags parsed {parsed}, shared {shared}), {gc_objects} GC objects ({cycles} GC cycles, longest step at a cycle's end {:.1} ms); frame scripts run early {early_scripts} in {early_runs} goes ({early_walks} looks, {:.0} ms in all; asked for in the script phase {marks_scripts}, the exit phase {marks_exit}, between frames {marks_idle}), clips drawn before theirs {drawn_waiting}",
             total as f64 / MB,
             distinct as f64 / MB,
             longest as f64 / 1000.0,

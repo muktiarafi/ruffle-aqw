@@ -683,6 +683,11 @@ pub struct Library<'gc> {
     #[collect(require_static)]
     aqw_freed: (usize, FnvHashMap<usize, String>),
 
+    /// AQW build: of those, gear SWFs freed out of a domain still in use (see the end of
+    /// `sweep_movie_libraries`).
+    #[collect(require_static)]
+    aqw_freed_gear: usize,
+
     /// AQW build: the next choice of libraries to test takes all of them (see
     /// `sweep_movie_libraries`, `Player::free_unused_libraries_now`).
     #[collect(require_static)]
@@ -708,6 +713,7 @@ impl<'gc> Library<'gc> {
             default_font_cache: Default::default(),
             avm2_class_registry: Default::default(),
             aqw_freed: Default::default(),
+            aqw_freed_gear: 0,
             aqw_test_all: Default::default(),
         }
     }
@@ -716,6 +722,22 @@ impl<'gc> Library<'gc> {
     /// wait and the bounds (for "Free memory now").
     pub fn test_all_libraries_next(&self) {
         self.aqw_test_all.set(true);
+    }
+
+    /// Turu: sets every library aside as a test does (`on`), so a heap walk in between sees
+    /// what holds a movie besides its own library (`Player::log_movie_retention`), and puts back
+    /// what it set aside (`!on`, with what `on` returned). No collection may run in between.
+    pub fn aqw_set_aside_libraries(&self, on: bool, set_aside: &[usize]) -> Vec<usize> {
+        let mut changed = Vec::new();
+        for (addr, library) in self.movie_libraries.0.iter() {
+            if on && !library.aqw_gc.testing.get() {
+                library.aqw_gc.testing.set(true);
+                changed.push(*addr);
+            } else if !on && set_aside.contains(addr) {
+                library.aqw_gc.testing.set(false);
+            }
+        }
+        changed
     }
 
     /// AQW build: what a movie is named by where a `'gc` handle can't be kept (a thread-local,
@@ -810,6 +832,11 @@ impl<'gc> Library<'gc> {
         self.aqw_freed.0
     }
 
+    /// AQW build, for the perf log: gear SWFs freed out of a domain still in use.
+    pub fn freed_gear_count(&self) -> usize {
+        self.aqw_freed_gear
+    }
+
     /// AQW build: frees the libraries of loaded SWFs that nothing uses anymore.
     ///
     /// A `MovieLibrary` holds its own movie (and its characters hold more), and stock Ruffle
@@ -858,6 +885,12 @@ impl<'gc> Library<'gc> {
                 library.aqw_gc.wait.set(backoff);
                 let mut revive = Revive { fc, revived: false };
                 library.trace(&mut revive);
+                // (A gear SWF's definitions its domain left out this cycle: kept with it.)
+                if let Some(domain) = library.avm2_domain
+                    && domain.aqw_skips(*addr)
+                {
+                    domain.aqw_trace_movie(*addr, &mut revive);
+                }
                 revived |= revive.revived;
             }
         }
@@ -890,6 +923,15 @@ impl<'gc> Library<'gc> {
         }
         for addr in dead {
             if let Some(library) = self.movie_libraries.0.remove(&addr) {
+                // AQW build: a gear SWF's definitions, left out by its live domain, go before
+                // the sweep frees them (see the end of this function).
+                if let Some(domain) = library.avm2_domain
+                    && !domain.aqw_is_dead(fc)
+                    && domain.aqw_skips(addr)
+                {
+                    self.aqw_freed_gear += 1;
+                    domain.aqw_remove_movie(addr);
+                }
                 self.aqw_freed.0 += 1;
                 // (Its movie wasn't reached, but nothing is swept yet: it can still be read.)
                 self.aqw_freed.1.insert(addr, library.swf.url().to_owned());
@@ -993,6 +1035,36 @@ impl<'gc> Library<'gc> {
                     library.aqw_gc.testing.set(true);
                 }
             }
+        }
+
+        // AQW build: AQW loads every other player's gear into one domain per map
+        // (`World.loaderD`), which holds each SWF's scripts, and a gear SWF's code anywhere on
+        // screen keeps the domain: tested whole or alone, none of a map's gear was freed while
+        // anyone stayed (a busy town: ~180 gear SWFs after 6 minutes, ~0.45 MB each). So in a
+        // domain shared with other SWFs, a gear SWF being tested isn't held by the domain: if
+        // nothing else uses it, its definitions are removed (above) and it is freed. AQW never
+        // looks another player's gear up without loading it first (`World.queueLoad`, then
+        // `getClass` in the load's callback; read in its client), so the next player wearing it
+        // loads it again. Only gear (`gamefiles/items/`): monsters and skill effects are made
+        // again from classes loaded once (`World.getClass` at each spawn or cast), and AQW
+        // remembers a failed lookup until the next map (`classMissCache`).
+        let mut skips: FnvHashMap<*const (), (Avm2Domain<'gc>, Vec<usize>)> = FnvHashMap::default();
+        for (addr, library) in self.movie_libraries.0.iter() {
+            let Some(domain) = library.avm2_domain else {
+                continue;
+            };
+            let key = domain.as_ptr() as *const ();
+            let entry = skips.entry(key).or_insert_with(|| (domain, Vec::new()));
+            if library.aqw_gc.testing.get()
+                && Some(key) != root_domain
+                && members.get(&key).is_some_and(|&n| n > 1)
+                && library.swf.url().contains("/gamefiles/items/")
+            {
+                entry.1.push(*addr);
+            }
+        }
+        for (domain, movies) in skips.into_values() {
+            domain.aqw_skip_movies(movies);
         }
     }
 

@@ -50,8 +50,6 @@ struct DomainData<'gc> {
     default_domain_memory: OnceLock<ByteArrayObject<'gc>>,
 }
 
-#[derive(Collect)]
-#[collect(no_drop)]
 struct DomainDataMut<'gc> {
     /// A list of all exported definitions and the script that exported them.
     defs: PropertyMap<'gc, Script<'gc>>,
@@ -64,6 +62,40 @@ struct DomainDataMut<'gc> {
     /// use with `debug_ui`
     #[cfg(feature = "egui")]
     children: Vec<DomainWeak<'gc>>,
+
+    /// AQW build: the movies (`Library::movie_addr`) whose definitions this domain doesn't
+    /// trace this GC cycle (`Domain::aqw_skip_movies`).
+    aqw_skip: std::cell::RefCell<fnv::FnvHashSet<usize>>,
+}
+
+/// AQW build: the address a definition's movie is known by in `aqw_skip`.
+fn script_movie(script: &Script<'_>) -> usize {
+    script.translation_unit().movie().as_ptr() as usize
+}
+
+fn class_movie(class: &Class<'_>) -> Option<usize> {
+    class
+        .translation_unit()
+        .map(|unit| unit.movie().as_ptr() as usize)
+}
+
+// AQW build: traced by hand to leave out the definitions of the movies in `aqw_skip`.
+unsafe impl<'gc> Collect<'gc> for DomainDataMut<'gc> {
+    fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
+        let skip = self.aqw_skip.borrow();
+        if skip.is_empty() {
+            cc.trace(&self.defs);
+            cc.trace(&self.classes);
+        } else {
+            self.defs
+                .aqw_trace_where(cc, |script| !skip.contains(&script_movie(script)));
+            self.classes.aqw_trace_where(cc, |class| {
+                !class_movie(class).is_some_and(|movie| skip.contains(&movie))
+            });
+        }
+        #[cfg(feature = "egui")]
+        cc.trace(&self.children);
+    }
 }
 
 const MIN_DOMAIN_MEMORY_LENGTH: usize = 1024;
@@ -94,6 +126,7 @@ impl<'gc> Domain<'gc> {
                     classes: PropertyMap::new(),
                     #[cfg(feature = "egui")]
                     children: Vec::new(),
+                    aqw_skip: Default::default(),
                 }),
                 parent,
                 domain_memory: Default::default(),
@@ -148,6 +181,7 @@ impl<'gc> Domain<'gc> {
                     classes: PropertyMap::new(),
                     #[cfg(feature = "egui")]
                     children: Vec::new(),
+                    aqw_skip: Default::default(),
                 }),
                 parent: Some(parent),
                 domain_memory: Lock::new(Some(domain_memory)),
@@ -346,6 +380,57 @@ impl<'gc> Domain<'gc> {
             return;
         }
         self.cell_mut(mc).classes.insert_at_end(export_name, class);
+    }
+
+    /// AQW build: this GC cycle, the domain doesn't trace the definitions of `movies` (by
+    /// `Library::movie_addr`), so that a gear SWF loaded into a domain shared with others is
+    /// kept only if something besides the domain uses it (`Library::sweep_movie_libraries`).
+    /// Each cycle's set replaces the last.
+    pub fn aqw_skip_movies(self, movies: impl IntoIterator<Item = usize>) {
+        let cell = self.cell();
+        let mut skip = cell.aqw_skip.borrow_mut();
+        skip.clear();
+        skip.extend(movies);
+    }
+
+    /// AQW build: whether the domain wasn't reached this GC cycle (while finalizing).
+    pub fn aqw_is_dead(self, fc: &gc_arena::Finalization<'gc>) -> bool {
+        Gc::is_dead(fc, self.0)
+    }
+
+    /// AQW build: whether this cycle leaves out `movie`'s definitions.
+    pub fn aqw_skips(self, movie: usize) -> bool {
+        self.cell().aqw_skip.borrow().contains(&movie)
+    }
+
+    /// AQW build: traces the definitions of `movie`, left out this cycle, once it was found in
+    /// use (they are kept, so they mustn't be swept).
+    pub fn aqw_trace_movie<C: gc_arena::collect::Trace<'gc>>(self, movie: usize, cc: &mut C) {
+        let cell = self.cell();
+        for (_, _, script) in cell.defs.iter() {
+            if script_movie(script) == movie {
+                cc.trace(script);
+            }
+        }
+        for (_, _, class) in cell.classes.iter() {
+            if class_movie(class) == Some(movie) {
+                cc.trace(class);
+            }
+        }
+    }
+
+    /// AQW build: removes the definitions of `movie`, which nothing else uses, before the
+    /// sweep frees it; how many went. AQW loads another player's gear again when it's next
+    /// worn, and the next load defines its classes again.
+    pub fn aqw_remove_movie(self, movie: usize) -> usize {
+        // SAFETY: entries are only removed, no `Gc` pointer is adopted, so no write barrier is
+        // needed (and none may be set off while finalizing).
+        let mut cell = unsafe { Gc::as_ref(self.0).cell.as_ref_cell() }.borrow_mut();
+        cell.aqw_skip.get_mut().remove(&movie);
+        cell.defs.aqw_retain(|script| script_movie(script) != movie)
+            + cell
+                .classes
+                .aqw_retain(|class| class_movie(class) != Some(movie))
     }
 
     pub fn defs(&self) -> Ref<'_, PropertyMap<'gc, Script<'gc>>> {
