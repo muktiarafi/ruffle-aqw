@@ -411,11 +411,12 @@ impl AdapterContext {
                 outer: false,
             });
         }
+        let asked = super::aqw::stats_enabled().then(std::time::Instant::now);
         let guard = self
             .glow
             .try_lock_for(Duration::from_secs(CONTEXT_LOCK_TIMEOUT_SECS))
             .expect("Could not lock adapter context. This is most-likely a deadlock.");
-        super::aqw::note_lock();
+        super::aqw::note_lock(asked.map_or(Duration::ZERO, |asked| asked.elapsed()));
         super::aqw::note_hold();
         egl.make_current();
         // The mutex stays locked until the hold ends (`force_unlock` in its drop).
@@ -437,6 +438,8 @@ impl AdapterContext {
             super::aqw::note_held_lock();
             return AdapterContextLock { glow, egl: None };
         }
+        // AQW build: how long the lock waited, timed for `RUFFLE_GL_STATS` only.
+        let asked = super::aqw::stats_enabled().then(std::time::Instant::now);
         let glow = self
             .glow
             // Don't lock forever. If it takes longer than 1 second to get the lock we've got a
@@ -446,7 +449,7 @@ impl AdapterContext {
 
         // AQW build: counted for `RUFFLE_GL_STATS` (each lock makes the context current and
         // releases it again, which flushes it).
-        super::aqw::note_lock();
+        super::aqw::note_lock(asked.map_or(Duration::ZERO, |asked| asked.elapsed()));
         let egl = self.egl.as_ref().map(|egl| {
             egl.make_current();
             EglContextLock {

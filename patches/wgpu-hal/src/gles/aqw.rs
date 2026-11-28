@@ -1111,8 +1111,8 @@ mod totals {
         counts: Counts,
         submits: u64,
         submit_time: Duration,
-        /// Context locks by thread name.
-        locks: Vec<(String, u64)>,
+        /// Context locks by thread name, and the time they waited for the lock.
+        locks: Vec<(String, u64, Duration)>,
         /// G5b: locks taken while the thread held the context (`AdapterContext::hold`), which
         /// neither made it current nor released it.
         held_locks: u64,
@@ -1138,13 +1138,16 @@ mod totals {
         holds: 0,
     });
 
-    pub fn note_lock() {
+    pub fn note_lock(waited: Duration) {
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("unnamed");
         let mut totals = TOTALS.lock().unwrap_or_else(|e| e.into_inner());
-        match totals.locks.iter_mut().find(|(n, _)| n == name) {
-            Some((_, count)) => *count += 1,
-            None => totals.locks.push((name.into(), 1)),
+        match totals.locks.iter_mut().find(|(n, _, _)| n == name) {
+            Some((_, count, wait)) => {
+                *count += 1;
+                *wait += waited;
+            }
+            None => totals.locks.push((name.into(), 1, waited)),
         }
     }
 
@@ -1203,15 +1206,16 @@ mod totals {
             "); uploads {:.0}/s, {:.2} MB/s; context locks {:.0}/s (",
             per_s(c.uploads),
             per_s(c.upload_bytes) / (1024.0 * 1024.0),
-            per_s(totals.locks.iter().map(|(_, n)| n).sum()),
+            per_s(totals.locks.iter().map(|(_, n, _)| n).sum()),
         );
         totals.locks.sort_by(|a, b| b.1.cmp(&a.1));
-        for (i, (name, n)) in totals.locks.iter().enumerate() {
+        for (i, (name, n, wait)) in totals.locks.iter().enumerate() {
             let _ = write!(
                 line,
-                "{}{name} {:.0}",
+                "{}{name} {:.0} waiting {:.1} ms/s",
                 if i == 0 { "" } else { ", " },
-                per_s(*n)
+                per_s(*n),
+                per_s(wait.as_micros() as u64) / 1000.0
             );
         }
         let _ = write!(
@@ -1232,13 +1236,16 @@ mod totals {
     }
 }
 
-/// Counts a context lock on this thread (`RUFFLE_GL_STATS` only).
+/// Counts a context lock on this thread and the time it `waited` for it (`RUFFLE_GL_STATS`
+/// only).
 #[inline]
-pub(super) fn note_lock() {
+pub(super) fn note_lock(waited: core::time::Duration) {
     #[cfg(gles_with_std)]
     if stats_enabled() {
-        totals::note_lock();
+        totals::note_lock(waited);
     }
+    #[cfg(not(gles_with_std))]
+    let _ = waited;
 }
 
 /// Counts a lock taken inside a hold (G5b), which made nothing current (`RUFFLE_GL_STATS`
