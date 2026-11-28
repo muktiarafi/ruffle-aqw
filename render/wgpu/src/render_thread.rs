@@ -70,7 +70,8 @@ const RENDER_STACK: usize = 8 << 20;
 pub fn enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let enabled = std::env::var_os("RUFFLE_RENDER_THREAD").is_some();
+        // Turu: `0` is off (Android turns it on by default; `--env RUFFLE_RENDER_THREAD=0`).
+        let enabled = std::env::var_os("RUFFLE_RENDER_THREAD").is_some_and(|v| v != "0");
         if enabled {
             tracing::info!(
                 target: "ruffle_aqw_perf",

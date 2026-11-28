@@ -63,6 +63,8 @@ struct Bound<'encoder> {
     /// instance.
     changed: Cell<bool>,
     last_draw: Cell<Option<(u32, i32, u32, u32)>>,
+    /// Turu, a measurement (see `perf_counters::DRAWS_COLOR`): the kind of the draw being made.
+    kind: Cell<usize>,
 }
 
 impl<'encoder> CommandRenderer<'encoder> {
@@ -341,6 +343,7 @@ impl<'encoder> CommandRenderer<'encoder> {
         num_indices: u32,
         instance_index: u32,
     ) {
+        self.bound.kind.set(crate::perf_counters::DRAWS_QUAD);
         self.draw_at(
             render_pass,
             vertices,
@@ -377,7 +380,9 @@ impl<'encoder> CommandRenderer<'encoder> {
         }
         // A measurement: how many draws repeat the one before (same geometry, nothing set in
         // between, the next instance), which could be one instanced draw.
-        let repeats = !self.bound.changed.replace(false)
+        let set_since_last = self.bound.changed.replace(false);
+        let had_last = self.bound.last_draw.get().is_some();
+        let repeats = !set_since_last
             && self.bound.last_draw.get()
                 == Some((
                     first_index,
@@ -394,6 +399,20 @@ impl<'encoder> CommandRenderer<'encoder> {
         crate::perf_counters::inc(crate::perf_counters::DRAWS);
         if repeats {
             crate::perf_counters::inc(crate::perf_counters::DRAWS_REPEAT);
+        }
+        // Turu, a measurement: the draw's kind, and whether only its geometry and transform
+        // differ from the draw before (nothing set in between in this pass).
+        let kind = self.bound.kind.get();
+        crate::perf_counters::inc(kind);
+        if !set_since_last && had_last {
+            crate::perf_counters::inc(crate::perf_counters::DRAWS_SAME_STATE);
+            if kind == crate::perf_counters::DRAWS_COLOR {
+                crate::perf_counters::inc(crate::perf_counters::DRAWS_SAME_STATE_COLOR);
+                crate::perf_counters::add(
+                    crate::perf_counters::SAME_STATE_COLOR_INDICES,
+                    num_indices,
+                );
+            }
         }
         render_pass.draw_indexed(
             first_index..first_index + num_indices,
@@ -482,12 +501,15 @@ impl<'encoder> CommandRenderer<'encoder> {
             match &draw.draw_type {
                 DrawType::Color => {
                     self.prep_color(render_pass);
+                    self.bound.kind.set(crate::perf_counters::DRAWS_COLOR);
                 }
                 DrawType::Gradient { bind_group, .. } => {
                     self.prep_gradient(render_pass, bind_group);
+                    self.bound.kind.set(crate::perf_counters::DRAWS_GRADIENT);
                 }
                 DrawType::Bitmap { binds, .. } => {
                     self.prep_bitmap(render_pass, &binds.bind_group, TrivialBlend::Normal, false);
+                    self.bound.kind.set(crate::perf_counters::DRAWS_BITMAP_FILL);
                 }
             }
 

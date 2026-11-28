@@ -664,7 +664,20 @@ pub mod perf_counters {
     pub const BITMAP_NEW: usize = 60;
     pub const CAB_TEXTURE_NEW: usize = 61;
     pub const CAB_TEXTURE_REUSED: usize = 62;
-    const LEN: usize = 63;
+    /// Turu (docs/GL_RENDERER_PROPOSAL.md in Turu, step 3, a measurement): the command
+    /// renderer's draws by kind (a shape's solid-colour, gradient and bitmap fills; quads:
+    /// bitmaps, layers, masks, rectangles, lines), the draws with nothing set since the draw
+    /// before in their pass (only their geometry and transform differ: what batching on the
+    /// CPU would join to the draw before), of which solid-colour, and those solid-colour
+    /// draws' indices (the vertices such batching would transform on the CPU).
+    pub const DRAWS_COLOR: usize = 63;
+    pub const DRAWS_GRADIENT: usize = 64;
+    pub const DRAWS_BITMAP_FILL: usize = 65;
+    pub const DRAWS_QUAD: usize = 66;
+    pub const DRAWS_SAME_STATE: usize = 67;
+    pub const DRAWS_SAME_STATE_COLOR: usize = 68;
+    pub const SAME_STATE_COLOR_INDICES: usize = 69;
+    const LEN: usize = 70;
     pub const NAMES: [&str; LEN] = [
         "passes",
         "layer",
@@ -729,6 +742,13 @@ pub mod perf_counters {
         "bitmap_new",
         "cab_texture_new",
         "cab_texture_reused",
+        "draws_color",
+        "draws_gradient",
+        "draws_bitmap_fill",
+        "draws_quad",
+        "draws_same_state",
+        "draws_same_state_color",
+        "same_state_color_indices",
     ];
 
     static COUNTS: [AtomicU32; LEN] = [const { AtomicU32::new(0) }; LEN];
