@@ -1969,6 +1969,11 @@ impl crate::Queue for super::Queue {
         if super::aqw::stats_enabled() {
             super::aqw::submitted(&rs.counts, started.elapsed());
         }
+        // AQW build (Turu): GL errors, once a second (`aqw::take_errors`).
+        #[cfg(gles_with_std)]
+        unsafe {
+            super::aqw::check_errors(gl)
+        };
 
         Ok(())
     }

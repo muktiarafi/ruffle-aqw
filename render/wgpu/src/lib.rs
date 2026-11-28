@@ -913,6 +913,22 @@ thread_local! {
     static GL_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Turu (docs/GL_RENDERER_PROPOSAL.md in Turu, "Step 1"): the GL errors seen since the last
+/// call, by name, with how many of wgpu-hal's once-a-second checks found each. A failed GL call
+/// only sets a flag, and the picture goes wrong with nothing in the log: the frontend logs these.
+/// Empty without OpenGL.
+pub fn take_gl_errors() -> Vec<(&'static str, u64)> {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    {
+        wgpu::hal::gles::aqw_take_errors()
+            .into_iter()
+            .map(|(code, count)| (wgpu::hal::gles::aqw_error_name(code), count))
+            .collect()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    Vec::new()
+}
+
 /// Turu (docs/GL_RENDERER_PROPOSAL.md in Turu, G5b): runs `f` with the GL context held on this
 /// thread (`wgpu_hal::gles::AdapterContext::hold`): every lock of the context inside it, ~70
 /// in a phone's frame, then neither makes the context current nor releases it (releasing may

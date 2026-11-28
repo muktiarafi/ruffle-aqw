@@ -92,6 +92,8 @@ mod wgl;
 mod adapter;
 // AQW build: the replay's counts and its shadow of GL state (Turu, docs/GL_RENDERER_PROPOSAL.md).
 mod aqw;
+// AQW build (Turu): the GL errors seen, for the frontend's log.
+pub use aqw::{error_name as aqw_error_name, take_errors as aqw_take_errors};
 mod command;
 mod conv;
 mod device;

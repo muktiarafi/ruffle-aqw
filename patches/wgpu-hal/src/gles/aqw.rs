@@ -1330,3 +1330,74 @@ impl MemoryInfo {
         }
     }
 }
+
+/// Turu (docs/GL_RENDERER_PROPOSAL.md, "Step 1"): GL errors seen since [`take_errors`] last
+/// took them, by code. A GL call that fails only sets an error flag nobody reads, and the
+/// picture is wrong with nothing in the log (G6's first build: every `glBufferSubData` refused
+/// by immutable storage). GL keeps one flag per code until it's read, so reading them once a
+/// second ([`check_errors`], at the end of a submit, the context locked) still finds every kind
+/// of error that happened, for the cost of a few `glGetError`s a second.
+#[cfg(gles_with_std)]
+static ERRORS: std::sync::Mutex<Vec<(u32, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Reads the GL error flags, at most once a second (see [`ERRORS`]).
+///
+/// # Safety
+///
+/// `gl` must be current on this thread (the context locked).
+#[cfg(gles_with_std)]
+pub(super) unsafe fn check_errors(gl: &glow::Context) {
+    use std::time::{Duration, Instant};
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    // `RUFFLE_TEST_GL_ERROR=1`: one invalid call at the first check (GL_INVALID_ENUM), to test
+    // that an error reaches the frontend's log.
+    static TESTED: std::sync::Once = std::sync::Once::new();
+    TESTED.call_once(|| {
+        if std::env::var("RUFFLE_TEST_GL_ERROR").is_ok_and(|v| v == "1") {
+            unsafe { gl.enable(0) };
+        }
+    });
+    // One flag per code: a handful at most (bounded, in case a lost context keeps answering).
+    for _ in 0..8 {
+        let code = unsafe { gl.get_error() };
+        if code == glow::NO_ERROR {
+            break;
+        }
+        let mut errors = ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+        match errors.iter_mut().find(|(c, _)| *c == code) {
+            Some((_, count)) => *count += 1,
+            None => errors.push((code, 1)),
+        }
+    }
+}
+
+/// The GL errors seen since the last call, by code (with how many of the once-a-second checks
+/// found each), for the frontend's log. Empty without GL.
+pub fn take_errors() -> Vec<(u32, u64)> {
+    #[cfg(gles_with_std)]
+    {
+        core::mem::take(&mut *ERRORS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(not(gles_with_std))]
+    Vec::new()
+}
+
+/// A GL error code's name.
+pub fn error_name(code: u32) -> &'static str {
+    match code {
+        glow::INVALID_ENUM => "GL_INVALID_ENUM",
+        glow::INVALID_VALUE => "GL_INVALID_VALUE",
+        glow::INVALID_OPERATION => "GL_INVALID_OPERATION",
+        glow::OUT_OF_MEMORY => "GL_OUT_OF_MEMORY",
+        glow::INVALID_FRAMEBUFFER_OPERATION => "GL_INVALID_FRAMEBUFFER_OPERATION",
+        glow::CONTEXT_LOST => "GL_CONTEXT_LOST",
+        _ => "an unknown GL error",
+    }
+}
