@@ -958,8 +958,12 @@ impl<'gc> Library<'gc> {
         // their classes, so each library kept the others' classes alive: tested one at a time
         // (each on its own backoff), none was ever found unused and every map join left a copy
         // of each monster (x25 per monster after 30 min of alternating two maps). The root
-        // movie's domain is left out (the root library is never tested, so it stays alive), as
-        // are groups too big for one cycle.
+        // movie's domain is left out (the root library is never tested, so it stays alive).
+        // A group is pulled whole however big it is: tested in parts, it is never found unused.
+        // AQW loads all of a map's players' gear into one domain too, and a busy town's group
+        // went past the cycle's bound and stayed after leaving: with the bound lowered to 16,
+        // Battleon left 83 live SWFs, against 14 pulled whole (heap 118 -> 104 MB), with the
+        // longest step at a cycle's end unchanged (under 4 ms). A library's test costs ~2 us.
         let domain_of =
             |library: &MovieLibrary<'gc>| library.avm2_domain.map(|d| d.as_ptr() as *const ());
         let root_domain = self.movie_libraries.get(root_movie).and_then(domain_of);
@@ -976,11 +980,7 @@ impl<'gc> Library<'gc> {
                 }
             }
         }
-        pulled.retain(|domain| {
-            members
-                .get(domain)
-                .is_some_and(|&n| n > 1 && n <= max_libraries)
-        });
+        pulled.retain(|domain| members.get(domain).is_some_and(|&n| n > 1));
         if !pulled.is_empty() {
             for library in self.movie_libraries.0.values() {
                 let movie = library.swf;
