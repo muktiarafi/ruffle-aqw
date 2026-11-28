@@ -81,7 +81,7 @@ impl<'gc> Graphic<'gc> {
         };
         let shared = GraphicShared {
             id,
-            shape: OnceCell::new(),
+            shape: parse_slots::Slot::evictable(),
             tag: Some((tag, version)),
             shape_bounds,
             edge_bounds,
@@ -105,7 +105,7 @@ impl<'gc> Graphic<'gc> {
             id: swf_shape.id,
             shape_bounds: swf_shape.shape_bounds.clone(),
             edge_bounds: swf_shape.edge_bounds.clone(),
-            shape: OnceCell::from(swf_shape),
+            shape: parse_slots::Slot::pinned(swf_shape),
             tag: None,
             movie,
             scaled_handle: OnceCell::new(),
@@ -133,7 +133,7 @@ impl<'gc> Graphic<'gc> {
             id: 0,
             shape_bounds: Default::default(),
             edge_bounds: Default::default(),
-            shape: OnceCell::from(Arc::new(empty_shape(
+            shape: parse_slots::Slot::pinned(Arc::new(empty_shape(
                 0,
                 Default::default(),
                 Default::default(),
@@ -199,7 +199,7 @@ impl<'gc> Graphic<'gc> {
         Self::handle_for(
             context,
             shared.movie,
-            shared.shape(),
+            &shared.shape(),
             shared.scaled_handle(),
             current_scale,
         )
@@ -309,7 +309,11 @@ impl<'gc> Graphic<'gc> {
                     }
                     (
                         key,
-                        Arc::new(scale9::slice_shape(shared.shape(), &child_matrix, &slicing)),
+                        Arc::new(scale9::slice_shape(
+                            &shared.shape(),
+                            &child_matrix,
+                            &slicing,
+                        )),
                         TessellationCache::new_shared(),
                     )
                 }
@@ -436,7 +440,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                     recorder.shape(
                         &context.commands,
                         crate::library::Library::movie_addr(shared.movie),
-                        shared.shape().clone(),
+                        shared.shape(),
                         shared.scaled_handle().clone(),
                     );
                 }
@@ -465,7 +469,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
             } else {
                 let shared = self.0.shared.get();
                 return ruffle_render::shape_utils::shape_hit_test(
-                    shared.shape(),
+                    &shared.shape(),
                     point,
                     &local_matrix,
                 );
@@ -516,9 +520,10 @@ struct GraphicShared<'gc> {
     movie: SwfMovie<'gc>,
     id: CharacterId,
 
-    /// AQW build: parsed from `tag` when first needed (see `shape`).
+    /// AQW build: parsed from `tag` when first needed (see `shape`). Turu: and let go of when
+    /// the shape hasn't been drawn or hit-tested for a while (see `parse_slots`).
     #[collect(require_static)]
-    shape: OnceCell<Arc<swf::Shape>>,
+    shape: std::rc::Rc<parse_slots::Slot>,
     /// AQW build: the DefineShape tag's body and version, for `shape`.
     #[collect(require_static)]
     tag: Option<(SwfSlice, u8)>,
@@ -550,8 +555,11 @@ impl GraphicShared<'_> {
     /// AQW build: the shape, parsed from its tag the first time it's asked for (an identical
     /// tag's parse if one is still in use, see `shared_shapes`). A tag that doesn't parse gives
     /// an empty shape (it used to leave the character out).
-    fn shape(&self) -> &Arc<swf::Shape> {
-        self.shape.get_or_init(|| {
+    ///
+    /// Turu: a clone of the `Arc`, since the parse can be let go of between calls (see
+    /// `parse_slots`); asking for it marks it used.
+    fn shape(&self) -> Arc<swf::Shape> {
+        self.shape.get_or_parse(|| {
             let parsed = self.tag.as_ref().map(|(tag, version)| {
                 shared_shapes::parsed(tag.data(), *version, || {
                     tag.read_from(0).read_define_shape(*version)
@@ -588,6 +596,110 @@ fn empty_shape(
             line_styles: Vec::new(),
         },
         shape: Vec::new(),
+    }
+}
+
+/// Turu: a graphic's parsed shape, let go of when it hasn't been asked for in a while.
+///
+/// A shape tag is parsed when first drawn or hit-tested (`GraphicShared::shape`), and the
+/// parse, several times the size of the tag (one record per edge), was kept as long as its
+/// library. AQW loads every player's gear into the map's one domain, kept while you're in the
+/// map, so standing in a busy town every item anyone walked in with stayed parsed: a heap
+/// profile of a phone in Battleon (10 minutes, ~190 gear SWFs) found the parses the biggest
+/// thing kept, ~25 MB of ~114 MB. The tessellations of shapes not drawn for a while were
+/// already freed (`tessellation_cache::evict_unused`); the parses now go with them, and a
+/// shape drawn again is parsed again from its tag, which the graphic keeps. A shape that is
+/// drawn asks for its parse every frame (`render_self`), so only undrawn ones go. A graphic
+/// made from a parse (no tag to parse again) keeps it (`pinned`).
+pub mod parse_slots {
+    use std::cell::{Cell, RefCell};
+    use std::rc::{Rc, Weak};
+    use std::sync::Arc;
+
+    pub struct Slot {
+        shape: RefCell<Option<Arc<swf::Shape>>>,
+        /// When last asked for, on the shapes' clock (`tessellation_cache::clock`).
+        used: Cell<u32>,
+        /// Whether it's in `SLOTS` (once parsed, until let go of).
+        registered: Cell<bool>,
+        /// Never let go of.
+        pinned: bool,
+    }
+
+    thread_local! {
+        static SLOTS: RefCell<Vec<Weak<Slot>>> = const { RefCell::new(Vec::new()) };
+        /// Length at which slots of dropped graphics are removed.
+        static NEXT_PRUNE: Cell<usize> = const { Cell::new(4096) };
+    }
+
+    impl Slot {
+        /// A slot parsed when first asked for, and let go of when unused.
+        pub fn evictable() -> Rc<Self> {
+            Rc::new(Self {
+                shape: RefCell::new(None),
+                used: Cell::new(0),
+                registered: Cell::new(false),
+                pinned: false,
+            })
+        }
+
+        /// A slot holding `shape` for good.
+        pub fn pinned(shape: Arc<swf::Shape>) -> Rc<Self> {
+            Rc::new(Self {
+                shape: RefCell::new(Some(shape)),
+                used: Cell::new(0),
+                registered: Cell::new(false),
+                pinned: true,
+            })
+        }
+
+        /// The parse, `parse()`'s if there's none (now or since it was let go of).
+        pub fn get_or_parse(
+            self: &Rc<Self>,
+            parse: impl FnOnce() -> Arc<swf::Shape>,
+        ) -> Arc<swf::Shape> {
+            self.used.set(crate::tessellation_cache::clock());
+            if let Some(shape) = self.shape.borrow().as_ref() {
+                return shape.clone();
+            }
+            let shape = parse();
+            *self.shape.borrow_mut() = Some(shape.clone());
+            if !self.pinned && !self.registered.replace(true) {
+                SLOTS.with_borrow_mut(|slots| {
+                    if slots.len() >= NEXT_PRUNE.with(Cell::get) {
+                        slots.retain(|slot| slot.strong_count() > 0);
+                        NEXT_PRUNE.with(|next| next.set((slots.len() * 2).max(4096)));
+                    }
+                    slots.push(Rc::downgrade(self));
+                });
+            }
+            shape
+        }
+    }
+
+    /// Lets go of the parses not asked for since `cutoff` (the shapes' clock). How many.
+    pub fn evict_older_than(cutoff: u32) -> usize {
+        SLOTS.with_borrow_mut(|slots| {
+            let mut freed = 0;
+            slots.retain(|slot| {
+                let Some(slot) = slot.upgrade() else {
+                    return false;
+                };
+                if slot.used.get() >= cutoff {
+                    return true;
+                }
+                // (Never borrowed between frames, when this runs; if it were, kept for now.)
+                let Ok(mut shape) = slot.shape.try_borrow_mut() else {
+                    return true;
+                };
+                if shape.take().is_some() {
+                    freed += 1;
+                }
+                slot.registered.set(false);
+                false
+            });
+            freed
+        })
     }
 }
 

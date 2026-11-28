@@ -307,7 +307,7 @@ pub(crate) fn set_clock(secs: u32) {
     CLOCK.with(|c| c.set(secs));
 }
 
-fn clock() -> u32 {
+pub(crate) fn clock() -> u32 {
     CLOCK.with(Cell::get)
 }
 
@@ -332,6 +332,15 @@ pub fn evict_unused(unused_secs: u32) -> usize {
             }
             true
         });
+        // Turu: the parses of shapes not drawn or hit-tested since, too (they're parsed again
+        // from their tags if drawn again, see `graphic::parse_slots`).
+        let parses = crate::display_object::graphic::parse_slots::evict_older_than(cutoff);
+        if parses > 0 {
+            tracing::info!(
+                target: "ruffle_aqw_perf",
+                "let go of {parses} shape parses not drawn for {unused_secs} s"
+            );
+        }
         freed
     })
 }
