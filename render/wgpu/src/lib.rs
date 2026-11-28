@@ -899,8 +899,43 @@ pub(crate) fn catch_out_of_memory<R>(device: &wgpu::Device, f: impl FnOnce() -> 
 /// buffers waiting on wgpu's background drop thread).
 pub(crate) fn release_gpu_memory(descriptors: &descriptors::Descriptors) {
     let _ = descriptors.device.poll(wgpu::PollType::wait_indefinitely());
+    // Turu: not while this thread holds the GL context (`with_gl_context_held`): the drop
+    // thread waits for the hold to end, so this would wait its 2 s for nothing. The drops
+    // finish right after the hold.
     #[cfg(not(target_family = "wasm"))]
-    wgpu_core::aqw_flush_encoder_drops();
+    if !GL_HELD.with(std::cell::Cell::get) {
+        wgpu_core::aqw_flush_encoder_drops();
+    }
+}
+
+thread_local! {
+    /// Turu: whether this thread is inside `with_gl_context_held`.
+    static GL_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Turu (docs/GL_RENDERER_PROPOSAL.md in Turu, G5b): runs `f` with the GL context held on this
+/// thread (`wgpu_hal::gles::AdapterContext::hold`): every lock of the context inside it, ~70
+/// in a phone's frame, then neither makes the context current nor releases it (releasing may
+/// flush). Other threads that lock the context (wgpu's encoder drop thread) wait until `f`
+/// returns, so `f` must not wait on them: a frame's rendering and its submit, not a surface's
+/// configure or present. Only `f` on other backends, on Windows
+/// (WGL) and the web, or without `current` in `RUFFLE_GL_LEVERS` (the default).
+pub fn with_gl_context_held<R>(device: &wgpu::Device, f: impl FnOnce() -> R) -> R {
+    #[cfg(not(any(windows, target_family = "wasm")))]
+    {
+        // SAFETY: the hal device is only used to reach its context, which is only locked.
+        let hal = unsafe { device.as_hal::<wgpu::hal::api::Gles>() };
+        let _hold = hal.as_ref().and_then(|device| device.context().hold());
+        let was_held = GL_HELD.with(|held| held.replace(_hold.is_some() || held.get()));
+        let result = f();
+        GL_HELD.with(|held| held.set(was_held));
+        result
+    }
+    #[cfg(any(windows, target_family = "wasm"))]
+    {
+        let _ = device;
+        f()
+    }
 }
 
 /// AQW build: running out of GPU memory is not fatal.

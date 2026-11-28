@@ -115,19 +115,37 @@ impl Descriptors {
     /// entering a room or seeing an effect for the first time (2.8 s entering Yulgar on a
     /// Ryzen 9). Builds them all on background threads at startup, while AQW is loading.
     /// Vulkan doesn't need this (no freezes there), so it does nothing on other backends.
+    ///
+    /// Turu: OpenGL too (docs/GL_RENDERER_PROPOSAL.md in Turu, G5a): a pipeline's first use
+    /// translates its shaders to GLSL and has the driver compile and link them. A GL program
+    /// depends only on the shaders and their bindings (the backend's program cache is keyed by
+    /// those), not on the sample count or the target's format, so one sample count and one
+    /// format build every program; the pipelines made later for the others find them cached.
+    /// On one thread: every compile holds the GL context's lock, so more threads only take
+    /// turns. `RUFFLE_GL_WARM_UP=0` turns it off.
     pub fn warm_up(self: &Arc<Self>, target_format: wgpu::TextureFormat) {
-        if self.backend != Backend::Dx12 || self.warm_up_started.swap(true, Ordering::SeqCst) {
+        let gl = self.backend == Backend::Gl
+            && std::env::var("RUFFLE_GL_WARM_UP").map_or(true, |v| v != "0");
+        if (self.backend != Backend::Dx12 && !gl)
+            || self.warm_up_started.swap(true, Ordering::SeqCst)
+        {
             return;
         }
         let mut formats = vec![target_format];
-        if !formats.contains(&wgpu::TextureFormat::Rgba8Unorm) {
+        if !gl && !formats.contains(&wgpu::TextureFormat::Rgba8Unorm) {
             formats.push(wgpu::TextureFormat::Rgba8Unorm);
         }
         // AQW's quality: High = 4x, Medium = 2x, Low = 1x (offscreen layers too).
-        let mut sample_counts: Vec<u32> = [4, 2, 1]
-            .into_iter()
-            .map(|count| crate::utils::supported_sample_count(&self.adapter, count, target_format))
-            .collect();
+        let mut sample_counts: Vec<u32> = if gl {
+            vec![1]
+        } else {
+            [4, 2, 1]
+                .into_iter()
+                .map(|count| {
+                    crate::utils::supported_sample_count(&self.adapter, count, target_format)
+                })
+                .collect()
+        };
         sample_counts.dedup();
         let started = std::time::Instant::now();
         let mut jobs: Vec<Box<dyn FnOnce(&Descriptors) + Send>> = Vec::new();
@@ -160,6 +178,23 @@ impl Descriptors {
             }));
         }
         jobs.push(Box::new(|d: &Descriptors| d.filters.warm_up(d, 1)));
+        if gl {
+            let descriptors = self.clone();
+            let _ = std::thread::Builder::new()
+                .name("gl warm-up".into())
+                .spawn(move || {
+                    crate::perf_counters::timers::untimed_thread();
+                    for job in jobs {
+                        job(&descriptors);
+                    }
+                    tracing::info!(
+                        target: "ruffle_aqw_perf",
+                        "OpenGL pipelines ready after {:.1} s",
+                        started.elapsed().as_secs_f64()
+                    );
+                });
+            return;
+        }
         let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(jobs.len()));
         for (index, job) in jobs.into_iter().enumerate() {
             let descriptors = self.clone();

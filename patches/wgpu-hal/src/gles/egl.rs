@@ -1,10 +1,16 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::{ffi, mem::ManuallyDrop, ptr, time::Duration};
+use core::{
+    ffi,
+    mem::ManuallyDrop,
+    ptr,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 use std::sync::LazyLock;
 
 use glow::HasContext;
 use hashbrown::HashMap;
-use parking_lot::{MappedMutexGuard, Mutex, MutexGuard, RwLock};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 /// The amount of time to wait while trying to obtain a lock to the adapter context
 const CONTEXT_LOCK_TIMEOUT_SECS: u64 = 6;
@@ -197,6 +203,17 @@ impl EglContext {
 pub struct AdapterContext {
     glow: Mutex<ManuallyDrop<glow::Context>>,
     egl: Option<EglContext>,
+    /// AQW build (Turu, GL G5b): the thread holding the context with [`Self::hold`]
+    /// ([`this_thread`]), or 0. While it's set, `glow` stays locked and the context current on
+    /// that thread.
+    held_by: AtomicUsize,
+}
+
+/// AQW build (Turu, GL G5b): a number for the calling thread, never 0, unique among the threads
+/// alive (the address of a thread-local).
+fn this_thread() -> usize {
+    std::thread_local!(static MARK: u8 = const { 0 });
+    MARK.with(|mark| ptr::from_ref(mark) as usize)
 }
 
 unsafe impl Sync for AdapterContext {}
@@ -269,15 +286,51 @@ struct EglContextLock<'a> {
 /// A guard containing a lock to an [`AdapterContext`], while the GL context is kept current.
 #[expect(missing_debug_implementations)]
 pub struct AdapterContextLock<'a> {
-    glow: MutexGuard<'a, ManuallyDrop<glow::Context>>,
+    glow: GlowRef<'a>,
     egl: Option<EglContextLock<'a>>,
+}
+
+/// AQW build (Turu, GL G5b): the context, locked by this lock, or by this thread's
+/// [`AdapterContextHold`].
+enum GlowRef<'a> {
+    Locked(MutexGuard<'a, ManuallyDrop<glow::Context>>),
+    Held(&'a glow::Context),
 }
 
 impl<'a> core::ops::Deref for AdapterContextLock<'a> {
     type Target = glow::Context;
 
     fn deref(&self) -> &Self::Target {
-        &self.glow
+        match &self.glow {
+            GlowRef::Locked(guard) => guard,
+            GlowRef::Held(glow) => glow,
+        }
+    }
+}
+
+/// AQW build (Turu, GL G5b): keeps the context locked and current on one thread until dropped
+/// (see [`AdapterContext::hold`]).
+#[expect(missing_debug_implementations)]
+pub struct AdapterContextHold<'a> {
+    context: &'a AdapterContext,
+    /// Whether this hold began it (a nested one on the same thread leaves it to the outer).
+    outer: bool,
+}
+
+impl Drop for AdapterContextHold<'_> {
+    fn drop(&mut self) {
+        if !self.outer {
+            return;
+        }
+        let context = self.context;
+        context.held_by.store(0, Ordering::Release);
+        if let Some(egl) = &context.egl {
+            egl.unmake_current();
+        }
+        // SAFETY: `hold` locked the mutex and leaked its guard; nothing else unlocks it, and
+        // every lock taken through the hold (`GlowRef::Held`) borrows this hold's context, on
+        // this thread, and is gone (a lock can't outlive the frame that holds).
+        unsafe { context.glow.force_unlock() };
     }
 }
 
@@ -303,18 +356,87 @@ impl AdapterContext {
     ///
     /// > **Note:** Calling this function **will** still lock the [`glow::Context`] which adds an
     /// > extra safe-guard against accidental concurrent access to the context.
-    pub unsafe fn get_without_egl_lock(&self) -> MappedMutexGuard<'_, glow::Context> {
+    ///
+    /// AQW build: on a thread holding the context ([`Self::hold`]) this takes no lock, and the
+    /// context is already current there.
+    pub unsafe fn get_without_egl_lock(&self) -> AdapterContextLock<'_> {
+        if let Some(glow) = self.held_here() {
+            return AdapterContextLock { glow, egl: None };
+        }
         let guard = self
             .glow
             .try_lock_for(Duration::from_secs(CONTEXT_LOCK_TIMEOUT_SECS))
             .expect("Could not lock adapter context. This is most-likely a deadlock.");
-        MutexGuard::map(guard, |glow| &mut **glow)
+        AdapterContextLock {
+            glow: GlowRef::Locked(guard),
+            egl: None,
+        }
+    }
+
+    /// AQW build (Turu, GL G5b): the context, if this thread holds it.
+    fn held_here(&self) -> Option<GlowRef<'_>> {
+        if self.held_by.load(Ordering::Acquire) != this_thread() {
+            return None;
+        }
+        // SAFETY: this thread holds the mutex through its hold (which leaked the guard), so
+        // no other thread can reach the context until the hold ends, and this reference
+        // borrows `self`, which outlives it. Every use on this thread is shared (`&`).
+        Some(GlowRef::Held(unsafe { &**self.glow.data_ptr() }))
+    }
+
+    /// Whether this thread holds the context ([`Self::hold`]).
+    pub fn is_held_here(&self) -> bool {
+        self.held_by.load(Ordering::Acquire) == this_thread()
+    }
+
+    /// AQW build (Turu, GL G5b): locks the context and keeps it current on this thread until
+    /// the returned hold is dropped. Every [`Self::lock`] on this thread meanwhile is free: it
+    /// neither makes the context current nor releases it (releasing may flush). A frame locked
+    /// it ~70 times on a phone; on ANGLE over Vulkan (Xclipse 940) holding gained nothing
+    /// measurable, so it's off unless `current` is in `RUFFLE_GL_LEVERS`.
+    ///
+    /// Other threads that lock the context wait until the hold ends, so the holder must never
+    /// wait on a thread that locks it (wgpu-core's encoder drop thread does): hold only around
+    /// work that doesn't, such as a frame's rendering, and briefly. A hold within a hold on the
+    /// same thread does nothing. Without `current` in `RUFFLE_GL_LEVERS` (the default), or with
+    /// a context this backend didn't make (no EGL), there is no hold: `None`.
+    pub fn hold(&self) -> Option<AdapterContextHold<'_>> {
+        let egl = self.egl.as_ref()?;
+        if !super::aqw::levers().current {
+            return None;
+        }
+        if self.is_held_here() {
+            return Some(AdapterContextHold {
+                context: self,
+                outer: false,
+            });
+        }
+        let guard = self
+            .glow
+            .try_lock_for(Duration::from_secs(CONTEXT_LOCK_TIMEOUT_SECS))
+            .expect("Could not lock adapter context. This is most-likely a deadlock.");
+        super::aqw::note_lock();
+        super::aqw::note_hold();
+        egl.make_current();
+        // The mutex stays locked until the hold ends (`force_unlock` in its drop).
+        MutexGuard::leak(guard);
+        self.held_by.store(this_thread(), Ordering::Release);
+        Some(AdapterContextHold {
+            context: self,
+            outer: true,
+        })
     }
 
     /// Obtain a lock to the EGL context and get handle to the [`glow::Context`] that can be used to
     /// do rendering.
     #[track_caller]
     pub fn lock<'a>(&'a self) -> AdapterContextLock<'a> {
+        // AQW build (Turu, GL G5b): inside this thread's hold, the context is locked and
+        // current already.
+        if let Some(glow) = self.held_here() {
+            super::aqw::note_held_lock();
+            return AdapterContextLock { glow, egl: None };
+        }
         let glow = self
             .glow
             // Don't lock forever. If it takes longer than 1 second to get the lock we've got a
@@ -333,7 +455,10 @@ impl AdapterContext {
             }
         });
 
-        AdapterContextLock { glow, egl }
+        AdapterContextLock {
+            glow: GlowRef::Locked(glow),
+            egl,
+        }
     }
 }
 
@@ -1036,6 +1161,7 @@ impl crate::Instance for Instance {
                     glow: Mutex::new(gl),
                     // ERROR: Copying owned reference handles here, be careful to not drop them!
                     egl: Some(inner.egl.clone()),
+                    held_by: AtomicUsize::new(0),
                 },
                 self.options.clone(),
             )
@@ -1065,6 +1191,7 @@ impl super::Adapter {
                 AdapterContext {
                     glow: Mutex::new(ManuallyDrop::new(context)),
                     egl: None,
+                    held_by: AtomicUsize::new(0),
                 },
                 options,
             )
@@ -1180,13 +1307,23 @@ impl Surface {
                 crate::SurfaceError::Lost
                 // TODO: should we unset the current context here?
             })?;
-        self.egl
-            .instance
-            .make_current(self.egl.display, None, None, None)
-            .map_err(|e| {
-                log::error!("make_current(null) failed: {e}");
-                crate::SurfaceError::Lost
-            })?;
+        // AQW build (Turu, GL G5b): inside a hold the context stays current (on its pbuffer).
+        let released = if context.is_held_here() {
+            self.egl.instance.make_current(
+                self.egl.display,
+                self.egl.pbuffer,
+                self.egl.pbuffer,
+                Some(self.egl.raw),
+            )
+        } else {
+            self.egl
+                .instance
+                .make_current(self.egl.display, None, None, None)
+        };
+        released.map_err(|e| {
+            log::error!("make_current(null) failed: {e}");
+            crate::SurfaceError::Lost
+        })?;
 
         Ok(())
     }

@@ -271,10 +271,16 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.cmd_buffer.clear();
     }
     unsafe fn end_encoding(&mut self) -> Result<super::CommandBuffer, crate::DeviceError> {
-        Ok(mem::take(&mut self.cmd_buffer))
+        // AQW build (Turu, GL G5c): the next one starts from a kept buffer, if there is one.
+        let next = self.spare_buffers.take();
+        Ok(mem::replace(&mut self.cmd_buffer, next))
     }
-    unsafe fn reset_all<I>(&mut self, _command_buffers: I) {
-        //TODO: could re-use the allocations in all these command buffers
+    unsafe fn reset_all<I>(&mut self, command_buffers: I)
+    where
+        I: Iterator<Item = super::CommandBuffer>,
+    {
+        // AQW build (Turu, GL G5c): the allocations are kept for the next ones.
+        self.spare_buffers.give_back(command_buffers);
     }
 
     unsafe fn transition_buffers<'a, T>(&mut self, barriers: T)

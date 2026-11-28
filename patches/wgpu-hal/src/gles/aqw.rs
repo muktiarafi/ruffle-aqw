@@ -84,32 +84,190 @@ pub(super) fn stats_enabled() -> bool {
     false
 }
 
-/// The levers of G2 (`RUFFLE_GL_LEVERS`, asked once): a comma-separated list of `fbo` (G2a:
-/// detach only stale attachments) and `state` (G2b: skip calls that set what's already set).
-/// Unset: both. `none` (or empty): neither, the replay as upstream wgpu makes it.
+/// The levers of G2 and G5 (`RUFFLE_GL_LEVERS`, asked once): a comma-separated list of `fbo`
+/// (G2a: detach only stale attachments), `state` (G2b: skip calls that set what's already set),
+/// `current` (G5b: `AdapterContext::hold` keeps the EGL context current through a frame) and
+/// `recycle` (G5c: emptied command buffers are reused, [`SpareBuffers`]). Unset: `fbo` and
+/// `state`; `current` and `recycle` gained nothing measurable on a phone (ANGLE over Vulkan,
+/// docs/GL_RENDERER_PROPOSAL.md in Turu, G5), so they're only on when named. `none` (or empty):
+/// none, the replay and locking as upstream wgpu has them.
+///
+/// `RUFFLE_GL_AB=<lever>,<seconds>` flips one lever in every other window of `<seconds>`, and
+/// logs each switch: an A/B run in one session, in the same room with the same players (a new
+/// session lands in another room, so runs across sessions don't compare).
 #[derive(Clone, Copy)]
 pub(super) struct Levers {
     pub fbo: bool,
     pub state: bool,
+    #[cfg_attr(any(windows, webgl), allow(dead_code, reason = "only EGL holds"))]
+    pub current: bool,
+    pub recycle: bool,
 }
 
 pub(super) fn levers() -> Levers {
     #[cfg(gles_with_std)]
     {
-        static LEVERS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-        let &(fbo, state) = LEVERS.get_or_init(|| match std::env::var("RUFFLE_GL_LEVERS") {
-            Err(_) => (true, true),
+        static LEVERS: std::sync::OnceLock<Levers> = std::sync::OnceLock::new();
+        let levers = *LEVERS.get_or_init(|| match std::env::var("RUFFLE_GL_LEVERS") {
+            Err(_) => Levers::DEFAULT,
             Ok(list) => {
                 let has = |name: &str| list.split(',').any(|l| l.trim() == name);
-                (has("fbo"), has("state"))
+                Levers {
+                    fbo: has("fbo"),
+                    state: has("state"),
+                    current: has("current"),
+                    recycle: has("recycle"),
+                }
             }
         });
-        Levers { fbo, state }
+        ab::flipped(levers)
     }
     #[cfg(not(gles_with_std))]
-    Levers {
+    Levers::DEFAULT
+}
+
+impl Levers {
+    const DEFAULT: Levers = Levers {
         fbo: true,
         state: true,
+        current: false,
+        recycle: false,
+    };
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut bool> {
+        match name {
+            "fbo" => Some(&mut self.fbo),
+            "state" => Some(&mut self.state),
+            "current" => Some(&mut self.current),
+            "recycle" => Some(&mut self.recycle),
+            _ => None,
+        }
+    }
+}
+
+/// `RUFFLE_GL_AB` (see [`Levers`]).
+#[cfg(gles_with_std)]
+mod ab {
+    use super::Levers;
+    use alloc::string::String;
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    struct Ab {
+        lever: String,
+        secs: u64,
+        since: Instant,
+    }
+
+    pub(super) fn flipped(mut levers: Levers) -> Levers {
+        static AB: OnceLock<Option<Ab>> = OnceLock::new();
+        static WINDOW: AtomicU64 = AtomicU64::new(u64::MAX);
+        let Some(ab) = AB.get_or_init(|| {
+            let value = std::env::var("RUFFLE_GL_AB").ok()?;
+            let (lever, secs) = value.split_once(',')?;
+            let secs = secs.trim().parse::<u64>().ok().filter(|&s| s > 0)?;
+            let lever = String::from(lever.trim());
+            let mut probe = levers;
+            probe.get_mut(&lever)?;
+            Some(Ab {
+                lever,
+                secs,
+                since: Instant::now(),
+            })
+        }) else {
+            return levers;
+        };
+        let window = ab.since.elapsed().as_secs() / ab.secs;
+        let Some(on) = levers.get_mut(&ab.lever) else {
+            return levers;
+        };
+        if window % 2 == 1 {
+            *on = !*on;
+        }
+        if WINDOW.swap(window, Ordering::Relaxed) != window {
+            log::info!(
+                target: "ruffle_aqw_perf",
+                "GL A/B: {} {} for {} s",
+                ab.lever,
+                if *on { "on" } else { "off" },
+                ab.secs
+            );
+        }
+        levers
+    }
+}
+
+/// G5c (`recycle`): emptied command buffers, shared by the device's encoders, so a new one
+/// starts with room for its commands instead of growing its lists again (~11,000 command
+/// buffers a second on a phone in a crowded room). Device-wide with a hard cap, not per
+/// encoder: wgpu-core pools its encoders, so anything kept per encoder grows with that pool
+/// (Mugetsu's D3D12 recycling grew to gigabytes over a session before it was capped).
+#[derive(Default)]
+pub(super) struct SpareBuffers(parking_lot::Mutex<Vec<super::CommandBuffer>>);
+
+impl core::fmt::Debug for SpareBuffers {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "SpareBuffers({})", self.0.lock().len())
+    }
+}
+
+impl SpareBuffers {
+    /// Buffers kept at most.
+    const MAX: usize = 128;
+    /// Kept only if no list grew past this: a buffer that once held a huge pass isn't kept.
+    const MAX_COMMANDS: usize = 1024;
+    const MAX_DATA_BYTES: usize = 16 * 1024;
+    const MAX_QUERIES: usize = 64;
+
+    /// An empty command buffer, a kept one if there is one.
+    pub fn take(&self) -> super::CommandBuffer {
+        if !levers().recycle {
+            return Default::default();
+        }
+        let buffer = self.0.lock().pop();
+        match buffer {
+            Some(buffer) => {
+                note_reused();
+                buffer
+            }
+            None => Default::default(),
+        }
+    }
+
+    /// Keeps what fits of `buffers`, emptied (`CommandEncoder::reset_all`); drops the rest.
+    pub fn give_back(&self, buffers: impl Iterator<Item = super::CommandBuffer>) {
+        if !levers().recycle {
+            return;
+        }
+        let room = Self::MAX.saturating_sub(self.0.lock().len());
+        let kept: Vec<_> = buffers
+            .filter(|b| {
+                b.commands.capacity() <= Self::MAX_COMMANDS
+                    && b.data_bytes.capacity() <= Self::MAX_DATA_BYTES
+                    && b.queries.capacity() <= Self::MAX_QUERIES
+            })
+            .take(room)
+            .map(|mut b| {
+                // Emptied here, outside the lock: the commands hold buffers and textures.
+                b.label = None;
+                b.commands.clear();
+                b.data_bytes.clear();
+                b.queries.clear();
+                b
+            })
+            .collect();
+        let mut spare = self.0.lock();
+        let room = Self::MAX.saturating_sub(spare.len());
+        spare.extend(kept.into_iter().take(room));
+    }
+}
+
+/// Counts a command buffer reused (G5c; `RUFFLE_GL_STATS` only).
+fn note_reused() {
+    #[cfg(gles_with_std)]
+    if stats_enabled() {
+        totals::REUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -945,6 +1103,9 @@ mod totals {
 
     const PERIOD: Duration = Duration::from_secs(5);
 
+    /// G5c: command buffers reused (`SpareBuffers::take`).
+    pub static REUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
     struct Totals {
         since: Option<Instant>,
         counts: Counts,
@@ -952,6 +1113,11 @@ mod totals {
         submit_time: Duration,
         /// Context locks by thread name.
         locks: Vec<(String, u64)>,
+        /// G5b: locks taken while the thread held the context (`AdapterContext::hold`), which
+        /// neither made it current nor released it.
+        held_locks: u64,
+        /// G5b: holds begun (each one makes the context current and releases it once).
+        holds: u64,
     }
 
     static TOTALS: Mutex<Totals> = Mutex::new(Totals {
@@ -968,6 +1134,8 @@ mod totals {
         submits: 0,
         submit_time: Duration::ZERO,
         locks: Vec::new(),
+        held_locks: 0,
+        holds: 0,
     });
 
     pub fn note_lock() {
@@ -978,6 +1146,14 @@ mod totals {
             Some((_, count)) => *count += 1,
             None => totals.locks.push((name.into(), 1)),
         }
+    }
+
+    pub fn note_held_lock() {
+        TOTALS.lock().unwrap_or_else(|e| e.into_inner()).held_locks += 1;
+    }
+
+    pub fn note_hold() {
+        TOTALS.lock().unwrap_or_else(|e| e.into_inner()).holds += 1;
     }
 
     pub fn submitted(counts: &Counts, time: Duration) {
@@ -1038,13 +1214,21 @@ mod totals {
                 per_s(*n)
             );
         }
-        line.push(')');
+        let _ = write!(
+            line,
+            "); held: {:.0} holds/s, {:.0} locks/s inside them; command buffers reused {:.0}/s",
+            per_s(totals.holds),
+            per_s(totals.held_locks),
+            per_s(REUSED.swap(0, core::sync::atomic::Ordering::Relaxed)),
+        );
         log::info!(target: "ruffle_aqw_perf", "{line}");
         totals.since = Some(now);
         totals.counts = Counts::default();
         totals.submits = 0;
         totals.submit_time = Duration::ZERO;
         totals.locks.clear();
+        totals.held_locks = 0;
+        totals.holds = 0;
     }
 }
 
@@ -1054,6 +1238,27 @@ pub(super) fn note_lock() {
     #[cfg(gles_with_std)]
     if stats_enabled() {
         totals::note_lock();
+    }
+}
+
+/// Counts a lock taken inside a hold (G5b), which made nothing current (`RUFFLE_GL_STATS`
+/// only).
+#[inline]
+#[cfg_attr(any(windows, webgl), allow(dead_code, reason = "only EGL holds"))]
+pub(super) fn note_held_lock() {
+    #[cfg(gles_with_std)]
+    if stats_enabled() {
+        totals::note_held_lock();
+    }
+}
+
+/// Counts a hold begun (G5b; `RUFFLE_GL_STATS` only). Its own lock is counted by [`note_lock`].
+#[inline]
+#[cfg_attr(any(windows, webgl), allow(dead_code, reason = "only EGL holds"))]
+pub(super) fn note_hold() {
+    #[cfg(gles_with_std)]
+    if stats_enabled() {
+        totals::note_hold();
     }
 }
 

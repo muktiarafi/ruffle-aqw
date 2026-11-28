@@ -1131,6 +1131,7 @@ impl crate::Adapter for super::Adapter {
                 #[cfg(all(native, feature = "renderdoc"))]
                 render_doc: Default::default(),
                 counters: Default::default(),
+                spare_buffers: Default::default(),
             },
             queue: super::Queue {
                 shared: Arc::clone(&self.shared),

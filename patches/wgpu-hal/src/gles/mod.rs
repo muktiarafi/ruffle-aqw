@@ -101,7 +101,7 @@ mod queue;
 pub use fence::Fence;
 
 #[cfg(not(any(windows, webgl)))]
-pub use self::egl::{AdapterContext, AdapterContextLock};
+pub use self::egl::{AdapterContext, AdapterContextHold, AdapterContextLock};
 #[cfg(not(any(windows, webgl)))]
 pub use self::egl::{Instance, Surface};
 
@@ -351,6 +351,8 @@ pub struct Device {
     #[cfg(all(native, feature = "renderdoc"))]
     render_doc: crate::auxil::renderdoc::RenderDoc,
     counters: Arc<wgt::HalCounters>,
+    /// AQW build (Turu, GL G5c): emptied command buffers its encoders share.
+    spare_buffers: Arc<aqw::SpareBuffers>,
 }
 
 impl Drop for Device {
@@ -1136,6 +1138,8 @@ pub struct CommandEncoder {
     state: command::State,
     private_caps: PrivateCapabilities,
     counters: Arc<wgt::HalCounters>,
+    /// AQW build (Turu, GL G5c): the device's emptied command buffers.
+    spare_buffers: Arc<aqw::SpareBuffers>,
 }
 
 impl fmt::Debug for CommandEncoder {

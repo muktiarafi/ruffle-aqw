@@ -1262,10 +1262,11 @@ impl crate::Device for super::Device {
         self.counters.command_encoders.add(1);
 
         Ok(super::CommandEncoder {
-            cmd_buffer: super::CommandBuffer::default(),
+            cmd_buffer: self.spare_buffers.take(),
             state: Default::default(),
             private_caps: self.shared.private_caps,
             counters: Arc::clone(&self.counters),
+            spare_buffers: Arc::clone(&self.spare_buffers),
         })
     }
 

@@ -418,7 +418,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                 .into());
         }
 
-        // AQW build: on DirectX 12, build the render pipelines in the background now.
+        // AQW build: on DirectX 12 (Turu: and OpenGL), build the render pipelines in the
+        // background now.
         descriptors.warm_up(target.format());
 
         crate::surface::set_stage_edge_mode(StageQuality::Low);
